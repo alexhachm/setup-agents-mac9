@@ -1,0 +1,9 @@
+﻿node_modules/
+__pycache__/
+.venv/
+*.zip
+*.tar.gz
+*.log
+*.bin
+*.exe
+*.dmg

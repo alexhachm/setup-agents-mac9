@@ -1,0 +1,482 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Agent Control Center v2</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+
+<body>
+    <div id="app">
+        <!-- Setup & Launch Screen -->
+        <div id="connection-screen" class="screen active">
+            <div class="setup-screen">
+                <div class="setup-header">
+                    <div class="logo">🧠</div>
+                    <h1>Agent Control Center</h1>
+                    <p class="setup-subtitle">Set up a new project or launch an existing one</p>
+                </div>
+
+                <div class="setup-body">
+                    <!-- Left: Recent Projects -->
+                    <div class="setup-recent">
+                        <h3>📂 Recent Projects</h3>
+                        <div id="recent-projects-list" class="recent-projects-list">
+                            <div class="recent-empty">No recent projects found</div>
+                        </div>
+                        <div class="setup-separator">
+                            <button id="select-project-btn" class="secondary-btn full-width">📁 Browse for existing
+                                project…</button>
+                        </div>
+                    </div>
+
+                    <!-- Right: New Project Form -->
+                    <div class="setup-form-panel">
+                        <h3>🆕 New Project</h3>
+                        <div class="setup-form">
+                            <div class="form-group">
+                                <label for="setup-repo-url">Git Repository URL</label>
+                                <input type="text" id="setup-repo-url" placeholder="https://github.com/user/repo.git" />
+                                <small>Leave blank to create a new local project</small>
+                            </div>
+
+                            <div class="form-group">
+                                <label for="setup-project-path">Project Path</label>
+                                <div class="input-with-btn">
+                                    <input type="text" id="setup-project-path" placeholder="~/Desktop/my-project" />
+                                    <button id="setup-browse-btn" class="icon-btn" title="Browse">📁</button>
+                                </div>
+                            </div>
+
+                            <div class="form-row">
+                                <div class="form-group compact">
+                                    <label for="setup-workers">Workers</label>
+                                    <select id="setup-workers">
+                                        <option value="1">1</option>
+                                        <option value="2">2</option>
+                                        <option value="3" selected>3</option>
+                                        <option value="4">4</option>
+                                        <option value="5">5</option>
+                                        <option value="6">6</option>
+                                        <option value="7">7</option>
+                                        <option value="8">8</option>
+                                    </select>
+                                </div>
+                                <div class="form-group compact">
+                                    <label>Session Mode</label>
+                                    <div class="mode-toggle">
+                                        <label class="mode-option">
+                                            <input type="radio" name="setup-mode" value="fresh" checked />
+                                            <span>🆕 Fresh</span>
+                                        </label>
+                                        <label class="mode-option">
+                                            <input type="radio" name="setup-mode" value="continue" />
+                                            <span>▶️ Continue</span>
+                                        </label>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <button id="setup-run-btn" class="primary-btn full-width">
+                                🚀 Setup & Launch
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Setup Progress Console -->
+                <div id="setup-progress-panel" class="setup-progress-panel hidden">
+                    <div class="progress-header">
+                        <h3>⚙️ Setup Progress</h3>
+                        <span id="setup-status-badge" class="setup-status-badge">Running…</span>
+                    </div>
+                    <pre id="setup-console" class="setup-console"></pre>
+                </div>
+
+                <div id="connection-error" class="error-message"></div>
+            </div>
+        </div>
+
+        <!-- Main Dashboard -->
+        <div id="dashboard-screen" class="screen">
+            <!-- Header -->
+            <header class="header">
+                <div class="header-left">
+                    <span class="header-icon">🧠</span>
+                    <div class="header-text">
+                        <h1>Agent Control Center <span class="version-badge">v2</span></h1>
+                    </div>
+                </div>
+                <div class="header-center">
+                    <div id="project-tabs" class="project-tabs">
+                        <!-- Dynamically rendered project tabs -->
+                    </div>
+                    <button id="add-project-btn" class="add-project-btn" title="Add project">＋ Add</button>
+                </div>
+                <div class="header-right">
+                    <div class="connection-status">
+                        <span class="status-dot connected"></span>
+                        <span id="project-name" class="project-name"></span>
+                    </div>
+                    <button id="debug-toggle-btn" class="debug-btn" title="Toggle Debug Panel">🐛</button>
+                </div>
+            </header>
+
+            <!-- Command Bar -->
+            <div class="command-bar-wrapper">
+                <div id="clarification-banner" class="clarification-banner hidden">
+                    <span class="clarification-icon">❓</span>
+                    <div class="clarification-content">
+                        <span class="clarification-label">Master-2 needs clarification:</span>
+                        <span id="clarification-question"></span>
+                    </div>
+                </div>
+                <!-- Stagger Banner -->
+                <div id="stagger-banner" class="stagger-banner hidden">
+                    <span class="stagger-icon">⚠️</span>
+                    <span id="stagger-message"></span>
+                </div>
+                <div class="command-bar">
+                    <span class="command-icon">⌨️</span>
+                    <input type="text" id="command-input" placeholder="Tell Master-1 what you want..." />
+                    <button id="send-btn" class="send-btn">↑</button>
+                </div>
+            </div>
+
+            <!-- Tab Navigation -->
+            <nav class="tab-nav">
+                <button class="tab-btn active" data-tab="dashboard">📊 Dashboard</button>
+                <button class="tab-btn" data-tab="timeline">⏱ Timeline</button>
+                <button class="tab-btn" data-tab="health">💓 Health</button>
+                <button class="tab-btn" data-tab="knowledge">📚 Knowledge</button>
+                <button class="tab-btn" data-tab="signals">📡 Signals</button>
+                <button class="tab-btn" data-tab="stats">📈 Stats</button>
+                <button class="tab-btn" data-tab="launch">🚀 Launch</button>
+            </nav>
+
+            <!-- Tab Content Area -->
+            <main class="main-content">
+
+                <!-- ═══════ TAB: Dashboard (original v1 content) ═══════ -->
+                <div class="tab-content active" data-tab="dashboard">
+                    <!-- Master Agents Row -->
+                    <section class="masters-section">
+                        <div class="master-cards">
+                            <div class="master-card master-1" data-master="1">
+                                <div class="master-header">
+                                    <span class="master-icon">💬</span>
+                                    <div class="master-info">
+                                        <strong>Master-1</strong>
+                                        <small>Interface</small>
+                                    </div>
+                                    <span class="master-status-dot ready" title="Always ready"></span>
+                                </div>
+                                <p id="m1-status">Ready for input</p>
+                            </div>
+                            <div class="master-card master-2" data-master="2">
+                                <div class="master-header">
+                                    <span class="master-icon">🔨</span>
+                                    <div class="master-info">
+                                        <strong>Master-2</strong>
+                                        <small>Architect</small>
+                                    </div>
+                                    <span id="m2-ready-dot" class="master-status-dot scanning"
+                                        title="Scanning codebase..."></span>
+                                </div>
+                                <p id="m2-status">Scanning codebase...</p>
+                            </div>
+                            <div class="master-card master-3" data-master="3">
+                                <div class="master-header">
+                                    <span class="master-icon">📋</span>
+                                    <div class="master-info">
+                                        <strong>Master-3</strong>
+                                        <small>Allocator</small>
+                                    </div>
+                                    <span id="m3-ready-dot" class="master-status-dot scanning"
+                                        title="Scanning codebase..."></span>
+                                </div>
+                                <p id="m3-status">Scanning codebase...</p>
+                            </div>
+                        </div>
+                    </section>
+
+                    <!-- Request List with Tier Badges -->
+                    <section class="request-list-section">
+                        <div class="section-header">
+                            <h2>📋 Requests</h2>
+                        </div>
+                        <div id="request-list" class="request-list"></div>
+                    </section>
+
+                    <!-- Workflow Pipeline -->
+                    <section class="pipeline-section">
+                        <h2>📊 Workflow Pipeline</h2>
+                        <div class="pipeline">
+                            <div class="pipeline-stage" id="stage-input" data-stage="input">
+                                <div class="stage-header">
+                                    <span class="stage-icon">📝</span>
+                                    <span>Your Request</span>
+                                    <span class="stage-count" id="input-count">0</span>
+                                </div>
+                                <div class="stage-desc">Master-1 receives</div>
+                                <div class="stage-items" id="input-items"></div>
+                            </div>
+                            <div class="pipeline-arrow">→</div>
+                            <div class="pipeline-stage" id="stage-decomp" data-stage="decomp">
+                                <div class="stage-header">
+                                    <span class="stage-icon">🔨</span>
+                                    <span>Decomposing</span>
+                                    <span class="stage-count" id="decomp-count">0</span>
+                                </div>
+                                <div class="stage-desc">Master-2 breaks down</div>
+                                <div class="stage-items" id="decomp-items"></div>
+                            </div>
+                            <div class="pipeline-arrow">→</div>
+                            <div class="pipeline-stage" id="stage-queue" data-stage="queue">
+                                <div class="stage-header">
+                                    <span class="stage-icon">📋</span>
+                                    <span>Task Queue</span>
+                                    <span class="stage-count" id="queue-count">0</span>
+                                </div>
+                                <div class="stage-desc">Master-3 assigns</div>
+                                <div class="stage-items" id="queue-items"></div>
+                            </div>
+                            <div class="pipeline-arrow">→</div>
+                            <div class="pipeline-stage" id="stage-active" data-stage="active">
+                                <div class="stage-header">
+                                    <span class="stage-icon">⚙️</span>
+                                    <span>Active</span>
+                                    <span class="stage-count" id="active-count">0</span>
+                                </div>
+                                <div class="stage-desc">Workers executing</div>
+                                <div class="stage-items" id="active-items"></div>
+                            </div>
+                        </div>
+                    </section>
+
+                    <!-- Bottom: Workers + Activity -->
+                    <div class="bottom-row">
+                        <section class="worker-pool">
+                            <div class="section-header">
+                                <h2>👥 Workers <span id="worker-summary"></span></h2>
+                                <button class="collapse-btn" data-target="worker-grid">−</button>
+                            </div>
+                            <div id="worker-grid" class="worker-grid"></div>
+                        </section>
+                        <section class="activity-feed">
+                            <div class="section-header">
+                                <h2>📜 Activity</h2>
+                                <label class="autoscroll-toggle">
+                                    <input type="checkbox" id="autoscroll" checked />
+                                    Auto
+                                </label>
+                            </div>
+                            <div id="activity-log" class="activity-log"></div>
+                        </section>
+                    </div>
+                </div>
+
+                <!-- ═══════ TAB: Timeline / Waterfall ═══════ -->
+                <div class="tab-content" data-tab="timeline">
+                    <div class="timeline-controls">
+                        <div class="timeline-select-group">
+                            <label>Request:</label>
+                            <select id="timeline-request-select">
+                                <option value="">— Select a request —</option>
+                            </select>
+                            <button id="timeline-refresh-btn" class="secondary-btn">🔄 Refresh</button>
+                        </div>
+                        <div id="timeline-summary" class="timeline-summary"></div>
+                    </div>
+                    <div id="timeline-chart" class="timeline-chart">
+                        <div class="timeline-empty">Select a request to view its timeline</div>
+                    </div>
+                    <div id="timeline-legend" class="timeline-legend">
+                        <span class="legend-item"><span class="legend-color"
+                                style="background:#6e7681"></span>Handoff</span>
+                        <span class="legend-item"><span class="legend-color"
+                                style="background:#a371f7"></span>Triage</span>
+                        <span class="legend-item"><span class="legend-color"
+                                style="background:#8b5cf6"></span>Decomposition</span>
+                        <span class="legend-item"><span class="legend-color"
+                                style="background:#d29922"></span>Allocation</span>
+                        <span class="legend-item"><span class="legend-color"
+                                style="background:#58a6ff"></span>Worker</span>
+                        <span class="legend-item"><span class="legend-color"
+                                style="background:#79c0ff"></span>Validation</span>
+                        <span class="legend-item"><span class="legend-color"
+                                style="background:#3fb950"></span>Integration</span>
+                        <span class="legend-item"><span class="legend-color dead-time-legend"></span>Dead time</span>
+                    </div>
+                </div>
+
+                <!-- ═══════ TAB: Agent Health ═══════ -->
+                <div class="tab-content" data-tab="health">
+                    <div class="health-header">
+                        <h2 class="tab-panel-title">💓 Agent Health Dashboard</h2>
+                        <span id="health-update-time" class="health-update-time"></span>
+                    </div>
+                    <div id="health-cards" class="health-cards">
+                        <div class="health-empty">Loading agent health data...</div>
+                    </div>
+                </div>
+
+                <!-- ═══════ TAB: Knowledge ═══════ -->
+                <div class="tab-content" data-tab="knowledge">
+                    <div class="knowledge-layout">
+                        <div class="knowledge-sidebar">
+                            <h2 class="tab-panel-title">📚 Knowledge Files</h2>
+                            <div id="knowledge-file-list" class="knowledge-file-list">
+                                <div class="knowledge-empty">Loading knowledge files...</div>
+                            </div>
+                        </div>
+                        <div class="knowledge-content">
+                            <div class="knowledge-content-header">
+                                <h3 id="knowledge-file-name">Select a file</h3>
+                                <span id="knowledge-file-meta" class="knowledge-file-meta"></span>
+                            </div>
+                            <div id="knowledge-file-content" class="knowledge-file-content">
+                                <div class="knowledge-empty">Select a file from the sidebar to view its content</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ═══════ TAB: Signals ═══════ -->
+                <div class="tab-content" data-tab="signals">
+                    <h2 class="tab-panel-title">📡 Signal Monitor</h2>
+                    <div class="signal-strip">
+                        <span class="signal-strip-label">LIVE SIGNALS</span>
+                        <div id="signal-pills" class="signal-pills"></div>
+                    </div>
+                    <div class="signal-history-section">
+                        <h3>Signal History <span id="signal-count" class="signal-count">0</span></h3>
+                        <div id="signal-history" class="signal-history">
+                            <div class="signal-empty">No signal events recorded yet</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ═══════ TAB: Stats ═══════ -->
+                <div class="tab-content" data-tab="stats">
+                    <div class="stats-header">
+                        <h2 class="tab-panel-title">📈 Session Statistics</h2>
+                        <div class="stats-controls">
+                            <button id="stats-refresh-btn" class="secondary-btn">🔄 Refresh</button>
+                            <button id="stats-export-json-btn" class="secondary-btn">📋 Export JSON</button>
+                            <button id="stats-export-md-btn" class="secondary-btn">📝 Export MD</button>
+                        </div>
+                    </div>
+                    <div id="stats-content" class="stats-content">
+                        <div class="stats-empty">No session data available yet</div>
+                    </div>
+                </div>
+
+                <!-- ═══════ TAB: Launch ═══════ -->
+                <div class="tab-content" data-tab="launch">
+                    <!-- Project Switcher -->
+                    <div class="launch-project-bar">
+                        <span class="launch-project-label">PROJECT:</span>
+                        <select id="launch-project-select" class="launch-project-select">
+                            <option value="">— Current project —</option>
+                        </select>
+                        <button id="launch-add-project-btn" class="secondary-btn">+ Add Project</button>
+                    </div>
+
+                    <!-- No Manifest Notice -->
+                    <div id="launch-no-manifest" class="launch-no-manifest hidden">
+                        <div class="launch-notice-icon">⚠️</div>
+                        <p>No launcher manifest found. Run <code>setup.sh</code> first to generate agent launchers.</p>
+                    </div>
+
+                    <!-- Agent Groups -->
+                    <div id="launch-agents-container" class="launch-agents-container">
+                        <!-- Masters Group -->
+                        <section class="launch-group-section">
+                            <div class="launch-group-header">
+                                <h2>🧠 Masters</h2>
+                                <button id="launch-all-masters-btn" class="launch-all-btn">▶ Launch All Masters</button>
+                            </div>
+                            <div id="launch-masters-grid" class="launch-agent-grid"></div>
+                        </section>
+
+                        <!-- Workers Group -->
+                        <section class="launch-group-section">
+                            <div class="launch-group-header">
+                                <h2>👥 Workers</h2>
+                                <button id="launch-all-workers-btn" class="launch-all-btn">▶ Launch All Workers</button>
+                            </div>
+                            <div id="launch-workers-grid" class="launch-agent-grid"></div>
+                        </section>
+                    </div>
+
+                    <!-- Bottom Controls -->
+                    <div class="launch-controls">
+                        <button id="launch-everything-btn" class="launch-everything-btn">🚀 Launch Everything</button>
+                        <div class="launch-mode-toggle">
+                            <label class="mode-option">
+                                <input type="radio" name="launch-mode" value="fresh" checked />
+                                <span>🆕 Fresh</span>
+                            </label>
+                            <label class="mode-option">
+                                <input type="radio" name="launch-mode" value="continue" />
+                                <span>▶️ Continue</span>
+                            </label>
+                        </div>
+                        <label class="launch-merge-option">
+                            <input type="checkbox" id="launch-merge-tabs" checked />
+                            <span>Merge into tabs</span>
+                        </label>
+                    </div>
+                </div>
+
+            </main>
+
+            <!-- Detail Panel (slide-out) -->
+            <div id="detail-panel" class="detail-panel hidden">
+                <div class="detail-header">
+                    <h3 id="detail-title">Details</h3>
+                    <button id="close-detail-btn" class="close-btn">×</button>
+                </div>
+                <div id="detail-content" class="detail-content"></div>
+            </div>
+
+            <!-- Toast Container -->
+            <div id="toast-container" class="toast-container"></div>
+
+            <!-- Debug Panel (collapsible) -->
+            <div id="debug-panel" class="debug-panel hidden">
+                <div class="debug-header">
+                    <h2>🐛 Debug</h2>
+                    <div class="debug-controls">
+                        <button id="refresh-files-btn" class="debug-ctrl-btn">🔄</button>
+                        <label class="debug-autoscroll">
+                            <input type="checkbox" id="debug-autoscroll" checked />
+                            Auto
+                        </label>
+                    </div>
+                </div>
+                <div class="debug-content">
+                    <div class="debug-section">
+                        <h3>📁 Files</h3>
+                        <div id="files-list" class="files-list-container"></div>
+                    </div>
+                    <div class="debug-section">
+                        <h3>📊 State</h3>
+                        <pre id="raw-state-display" class="raw-state"></pre>
+                    </div>
+                    <div class="debug-section debug-log-section">
+                        <h3>📝 Log</h3>
+                        <div id="debug-log-list" class="debug-log-list"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+
+</html>

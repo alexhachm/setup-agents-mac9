@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(powershell -NoProfile -Command \"$errors = $null; [System.Management.Automation.PSParser]::Tokenize\\([IO.File]::ReadAllText\\(''C:\\\\Users\\\\Owner\\\\Desktop\\\\setup-agents-mac8\\\\setup-agents-mac9\\\\setup.ps1''\\), [ref]$errors\\); if \\($errors.Count -eq 0\\) { ''SYNTAX OK'' } else { $errors | ForEach-Object { ''{0}:{1} - {2}'' -f $_Token.StartLine, $_Token.StartColumn, $_Message } }\")",
+      "Bash(powershell:*)",
+      "Bash(git commit:*)",
+      "Bash(git config:*)",
+      "Bash(git merge:*)",
+      "Bash(git checkout:*)",
+      "Bash(del \"C:\\\\Users\\\\Owner\\\\Desktop\\\\setup-agents-mac8\\\\fix-enc.ps1\")"
+    ]
+  }
+}

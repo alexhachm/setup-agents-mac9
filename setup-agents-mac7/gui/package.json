@@ -1,0 +1,15 @@
+{
+  "name": "agent-control-center",
+  "version": "1.0.0",
+  "description": "Multi-Agent Orchestration Control Center",
+  "main": "src/main/main.js",
+  "scripts": {
+    "start": "unset ELECTRON_RUN_AS_NODE && electron ."
+  },
+  "devDependencies": {
+    "electron": "^28.0.0"
+  },
+  "dependencies": {
+    "chokidar": "^3.5.3"
+  }
+}
