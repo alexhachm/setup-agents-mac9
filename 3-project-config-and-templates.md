@@ -19,10 +19,10 @@ User → Master-1 (Sonnet) → handoff.json + .handoff-signal
          ↕ clarification-queue.json
        Master-2 (Opus) ─── TRIAGE:
          ├─ Tier 1: Execute directly (commit, PR, done)
-         ├─ Tier 2: Assign to one worker directly + .worker-signal
+         ├─ Tier 2: Assign to one worker directly + .worker-N-signal
          └─ Tier 3: Decompose → task-queue.json + .task-signal
                       ↓
-       Master-3 (Sonnet) → TaskCreate(ASSIGNED_TO) + .worker-signal
+       Master-3 (Sonnet) → TaskCreate(ASSIGNED_TO) + .worker-N-signal
          ↕ worker-status.json
        Workers 1-8 (Opus, isolated worktrees, one domain each)
          └─ .completion-signal on task done
@@ -89,6 +89,8 @@ Each master has a detailed role document:
 | `worker-lessons.md` | Master-1 (appends on fix tasks) | Workers |
 | `change-summaries.md` | Workers (append after each task) | Workers, Master-3 |
 
+All JSON state files contain a `_version` field that is auto-incremented by `state-lock.sh` after each successful write. This enables optimistic concurrency detection — agents can read the version before and after to detect concurrent modifications.
+
 `.claude/state/` is a symlink to `.claude-shared-state/`. Always use the lock helper:
 ```bash
 bash .claude/scripts/state-lock.sh .claude/state/<file> '<write command>'
@@ -102,7 +104,7 @@ Agents no longer sleep-poll. After writing state, touch a signal file. The downs
 |--------|--------|---------|---------|
 | `.claude/signals/.handoff-signal` | Master-1 | Master-2 | New request ready |
 | `.claude/signals/.task-signal` | Master-2 | Master-3 | Decomposed tasks ready |
-| `.claude/signals/.worker-signal` | Master-2/3 | Workers | Task assigned |
+| `.claude/signals/.worker-N-signal` | Master-2/3 | Worker N | Task assigned to worker N |
 | `.claude/signals/.fix-signal` | Master-1 | Master-3 | Fix request ready |
 | `.claude/signals/.completion-signal` | Workers | Master-3 | Task completed |
 
@@ -244,7 +246,7 @@ Before ANY reset (whether triggered by budget, task count, or RESET task):
 This is the most valuable thing you do besides coding. Your context is about to be erased — write down what you learned.
 
 ## Signal Files
-Wait for work: `bash .claude/scripts/signal-wait.sh .claude/signals/.worker-signal 10`
+Wait for work: `bash .claude/scripts/signal-wait.sh .claude/signals/.worker-N-signal 10` (replace N with your worker number)
 Signal completion: `touch .claude/signals/.completion-signal`
 
 ## Domain Rules
@@ -289,7 +291,13 @@ model: haiku
 allowed-tools: [Bash, Read]
 ---
 
-Run: npm install, build, lint, typecheck, test
+Auto-detect the build system and run appropriate commands:
+- If `Makefile` exists: `make`
+- If `Cargo.toml` exists: `cargo build`, `cargo test`, `cargo clippy`
+- If `go.mod` exists: `go build ./...`, `go test ./...`, `go vet ./...`
+- If `pyproject.toml` exists: `pip install -e .`, `pytest`, `ruff check .` or `flake8`
+- If `package.json` exists: `npm install`, `npm run build`, `npm run lint`, `npm run typecheck`, `npm test`
+- Otherwise: report SKIP for all checks
 
 Report:
 ```
@@ -349,11 +357,18 @@ allowed-tools: [Bash, Read, Grep, Glob]
       "Bash(*)", "Read(*)", "Write(*)", "Edit(*)", "MultiEdit(*)",
       "Grep(*)", "Glob(*)", "Task(*)", "TaskList(*)", "TaskCreate(*)", "TaskUpdate(*)"
     ],
-    "deny": ["Bash(rm -rf /)", "Bash(rm -rf ~)", "Bash(git push --force)"]
+    "deny": [
+      "Bash(rm -rf /)", "Bash(rm -rf ~)", "Bash(rm -rf .)", "Bash(rm -rf *)",
+      "Bash(git reset --hard)", "Bash(git clean -fd)", "Bash(git clean -fdx)",
+      "Bash(git checkout -- .)", "Bash(git push --force)", "Bash(git push -f)",
+      "Bash(git push origin -f)", "Bash(git push origin --force)",
+      "Bash(chmod -R 777)", "Bash(curl|bash)", "Bash(curl|sh)",
+      "Bash(wget|bash)", "Bash(wget|sh)"
+    ]
   },
   "hooks": {
     "PreToolUse": [{
-      "matcher": "Edit|Write|MultiEdit|Read",
+      "matcher": "Edit|Write|MultiEdit|Read|Bash",
       "hooks": [{"type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/pre-tool-secret-guard.sh\""}]
     }],
     "Stop": [{

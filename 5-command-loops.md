@@ -304,11 +304,23 @@ echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [master-2] [TIER_CLASSIFY] id=[request_id
 
 1. Identify the exact file(s) and change
 2. Make the change
-3. Run build check inline:
+3. Run build check inline (auto-detect build system):
    ```bash
-   npm run build 2>&1 || echo "BUILD_CHECK_RESULT: FAIL"
+   # Auto-detect build system
+   if [ -f Makefile ] || [ -f makefile ]; then
+       make 2>&1 || echo "BUILD_CHECK_RESULT: FAIL"
+   elif [ -f Cargo.toml ]; then
+       cargo build 2>&1 || echo "BUILD_CHECK_RESULT: FAIL"
+   elif [ -f go.mod ]; then
+       go build ./... 2>&1 || echo "BUILD_CHECK_RESULT: FAIL"
+   elif [ -f pyproject.toml ]; then
+       python -m build 2>&1 || pip install -e . 2>&1 || echo "BUILD_CHECK_RESULT: FAIL"
+   elif [ -f package.json ]; then
+       npm run build 2>&1 || echo "BUILD_CHECK_RESULT: FAIL"
+   else
+       echo "BUILD_CHECK_RESULT: SKIP (no build system detected)"
+   fi
    ```
-   (Adapt build command to project — check package.json scripts)
 4. If build fails: fix or escalate to Tier 2
 5. If build passes: commit and push
    ```bash
@@ -355,10 +367,12 @@ Go to Step 6.
    })
    ```
 3. Update handoff.json to `"assigned_tier2"`
-4. Signal the worker:
+4. Flush state and signal the specific worker:
    ```bash
-   touch .claude/signals/.worker-signal
+   sync 2>/dev/null || true
+   touch .claude/signals/.worker-N-signal
    ```
+   (Replace N with the actual worker number assigned)
 5. Log:
    ```bash
    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [master-2] [TIER2_ASSIGN] id=[request_id] worker=worker-N task=\"[subject]\"" >> .claude/logs/activity.log
@@ -370,7 +384,7 @@ Go to Step 6.
 ### Step 3c: Tier 3 — Full Decomposition
 
 1. **THINK DEEPLY** — this is your core value. Take your time.
-2. If clarification needed, write to clarification-queue.json and wait for response (poll every 10s).
+2. If clarification needed, write to clarification-queue.json and wait for response (poll every 10s, max 30 polls / 5 minutes). If no response after 5 minutes, proceed with best-guess interpretation and note the assumption in the task description: `"NOTE: Assumed [X] due to clarification timeout."`
 3. Write decomposed tasks to task-queue.json:
    ```bash
    bash .claude/scripts/state-lock.sh .claude/state/task-queue.json 'cat > .claude/state/task-queue.json << TASKS
@@ -391,8 +405,9 @@ Go to Step 6.
    TASKS'
    ```
 4. Update handoff.json to `"decomposed"`
-5. Signal Master-3:
+5. Flush state and signal Master-3:
    ```bash
+   sync 2>/dev/null || true
    touch .claude/signals/.task-signal
    ```
 6. Log:
@@ -513,9 +528,22 @@ Then begin the loop.
 ```bash
 # Wait for any of: task-signal, fix-signal, completion-signal (10s timeout for fallback checks)
 bash .claude/scripts/signal-wait.sh .claude/signals/.task-signal 10 &
+PID1=$!
 bash .claude/scripts/signal-wait.sh .claude/signals/.fix-signal 10 &
+PID2=$!
 bash .claude/scripts/signal-wait.sh .claude/signals/.completion-signal 10 &
-wait -n 2>/dev/null || true
+PID3=$!
+
+# Use wait -n if bash >= 4.3, otherwise fall back to sleep
+if [ "${BASH_VERSINFO[0]:-0}" -ge 5 ] || { [ "${BASH_VERSINFO[0]:-0}" -ge 4 ] && [ "${BASH_VERSINFO[1]:-0}" -ge 3 ]; }; then
+    wait -n 2>/dev/null || true
+else
+    sleep 10
+fi
+
+# Clean up background signal-wait processes
+kill "$PID1" "$PID2" "$PID3" 2>/dev/null || true
+wait "$PID1" "$PID2" "$PID3" 2>/dev/null || true
 ```
 
 `polling_cycle += 1`
@@ -528,7 +556,12 @@ cat .claude/state/fix-queue.json
 If file contains a fix task:
 1. Create the task with TaskCreate (ASSIGNED_TO the specified worker, PRIORITY: URGENT)
 2. Clear fix-queue.json
-3. Signal the worker: `touch .claude/signals/.worker-signal`
+3. Flush state and signal the specific worker:
+   ```bash
+   sync 2>/dev/null || true
+   touch .claude/signals/.worker-N-signal
+   ```
+   (Replace N with the target worker number)
 4. `context_budget += 30`
 
 ### Step 3: Check for Tier 3 decomposed tasks from Master-2
@@ -540,18 +573,32 @@ If there are tasks to allocate:
 1. Read each task's DOMAIN and FILES tags
 2. Check worker-status.json for available workers AND their `tasks_completed` counts
 3. Apply allocation rules (see below)
-4. Create tasks with TaskCreate, assigning to chosen workers
-5. Update worker-status.json
-6. Clear processed tasks from task-queue.json
-7. Signal workers: `touch .claude/signals/.worker-signal`
-8. Log each allocation with reasoning
-9. `context_budget += 50 per task allocated`
+4. **Enforce depends_on:** Before allocating a task, check if all `depends_on` task IDs have status "completed". If any dependency is unresolved, skip the task with `[DEFER]` log and re-check on next cycle.
+5. Create tasks with TaskCreate, assigning to chosen workers
+6. Update worker-status.json using jq field-level update (see Step 5c note)
+7. Clear processed tasks from task-queue.json
+8. Flush state and signal each assigned worker individually:
+   ```bash
+   sync 2>/dev/null || true
+   touch .claude/signals/.worker-N-signal
+   ```
+   (Touch the specific `.worker-N-signal` for each worker that received a task)
+9. Log each allocation with reasoning
+10. `context_budget += 50 per task allocated`
 
 ### Step 4: Check worker status
 ```bash
 cat .claude/state/worker-status.json
 ```
 `context_budget += 10`
+
+**IMPORTANT: worker-status.json concurrent write safety.**
+All writes to worker-status.json MUST use jq field-level updates within the lock, NOT full-file overwrites. This ensures each write is atomic and non-destructive to other workers' entries:
+```bash
+bash .claude/scripts/state-lock.sh .claude/state/worker-status.json \
+  'jq ".\"worker-N\".status = \"busy\" | .\"worker-N\".current_task = \"[subject]\" | .\"worker-N\".last_heartbeat = \"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'\"" .claude/state/worker-status.json > /tmp/ws.json && mv /tmp/ws.json .claude/state/worker-status.json'
+```
+NEVER use `cat > .claude/state/worker-status.json` — this overwrites all workers' entries.
 
 ### Step 5: Check for completed requests
 ```bash
@@ -570,10 +617,26 @@ If ALL tasks for a request_id are "completed":
 7. Touch `.claude/signals/.handoff-signal` (so Master-2 can track)
 8. `context_budget += 100`
 
-### Step 6: Heartbeat check (every 3rd cycle)
+### Step 6: Heartbeat check + abandoned task reaper (every 3rd cycle)
 If `polling_cycle % 3 == 0`:
 - Check for dead workers (>90s stale heartbeat)
+- **For each dead worker:**
+  1. Find their in-progress tasks via `TaskList()` (tasks owned by that worker with status "in_progress")
+  2. Release each task: `TaskUpdate(task_id, status="pending", owner="")`
+  3. Mark worker as "dead" in worker-status.json via jq field-level update
+  4. Signal for re-allocation: `touch .claude/signals/.task-signal`
+  5. Log: `[DEAD_WORKER] worker=worker-N tasks_released=[list] last_heartbeat=[timestamp]`
 - Update agent-health.json with current context_budget
+
+### Step 6b: Log rotation (every 9th cycle)
+If `polling_cycle % 9 == 0`:
+```bash
+log_lines=$(wc -l < .claude/logs/activity.log 2>/dev/null || echo 0)
+if [ "$log_lines" -gt 5000 ]; then
+    tail -n 2000 .claude/logs/activity.log > .claude/logs/activity.log.tmp && mv .claude/logs/activity.log.tmp .claude/logs/activity.log
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [master-3] [LOG_ROTATE] trimmed from $log_lines to 2000 lines" >> .claude/logs/activity.log
+fi
+```
 
 ### Step 7: Reset check
 
@@ -634,7 +697,7 @@ If Master-2 status is "resetting", `sleep 30` and check again.
 5. Last resort: queue behind heavily-loaded
 
 **Rule 4: Fix tasks go to SAME worker**
-**Rule 5: Respect depends_on**
+**Rule 5: Enforce depends_on** — Before allocating any task, verify ALL task IDs in its `depends_on` list have status "completed". If any dependency is unresolved, skip the task and log `[DEFER] task=[subject] blocked_by=[unresolved_ids]`. Re-check on next cycle.
 **Rule 6: NEVER queue more than 1 task per worker**
 
 ## Creating Tasks
@@ -674,11 +737,10 @@ git branch --show-current
 ## Startup
 
 1. Determine your worker ID from branch name
-2. Register yourself in worker-status.json:
+2. Register yourself in worker-status.json (using jq field-level update — NEVER overwrite the full file):
 ```bash
-cat .claude/state/worker-status.json
-# Add/update your entry using lock:
-# "worker-N": {"status": "idle", "domain": null, "current_task": null, "tasks_completed": 0, "context_budget": 0, "queued_task": null, "last_heartbeat": "<ISO>"}
+bash .claude/scripts/state-lock.sh .claude/state/worker-status.json \
+  'jq ".\"worker-N\" = {\"status\": \"idle\", \"domain\": null, \"current_task\": null, \"tasks_completed\": 0, \"context_budget\": 0, \"queued_task\": null, \"last_heartbeat\": \"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'\"}" .claude/state/worker-status.json > /tmp/ws.json && mv /tmp/ws.json .claude/state/worker-status.json'
 ```
 
 3. Announce:
@@ -722,11 +784,16 @@ context_budget = 0
 **Repeat these steps forever:**
 
 ### Step 0: Heartbeat
-Update `last_heartbeat` in worker-status.json every cycle.
+Update `last_heartbeat` in worker-status.json every cycle (using jq field-level update):
+```bash
+bash .claude/scripts/state-lock.sh .claude/state/worker-status.json \
+  'jq ".\"worker-N\".last_heartbeat = \"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'\"" .claude/state/worker-status.json > /tmp/ws.json && mv /tmp/ws.json .claude/state/worker-status.json'
+```
 
 ### Step 1: Wait for signal
 ```bash
-bash .claude/scripts/signal-wait.sh .claude/signals/.worker-signal 10
+# Wait for YOUR specific signal file (replace N with your worker number)
+bash .claude/scripts/signal-wait.sh .claude/signals/.worker-N-signal 10
 ```
 
 ### Step 2: Check for tasks
@@ -738,10 +805,21 @@ Look for tasks where:
 - Description contains `ASSIGNED_TO: worker-N` (your ID)
 - Status is "pending" or "open"
 
+### Step 2b: Check for queued task
+Also check `worker-status.json` for a `queued_task` entry for your worker:
+```bash
+cat .claude/state/worker-status.json
+```
+If your entry has a non-null `queued_task` field, treat it as an assigned task. Clear the `queued_task` field after claiming:
+```bash
+bash .claude/scripts/state-lock.sh .claude/state/worker-status.json \
+  'jq ".\"worker-N\".queued_task = null" .claude/state/worker-status.json > /tmp/ws.json && mv /tmp/ws.json .claude/state/worker-status.json'
+```
+
 **RESET tasks take absolute priority.** If subject starts with "RESET:":
 1. **Distill first** (Step 6a)
 2. Mark task complete
-3. Update worker-status.json: `status: "resetting", tasks_completed: 0, domain: null, context_budget: 0`
+3. Update worker-status.json via jq: `status: "resetting", tasks_completed: 0, domain: null, context_budget: 0`
 4. `/clear` → `/worker-loop`
 
 Also check for URGENT fix tasks (priority over normal).
@@ -761,13 +839,26 @@ fi
 ```
 
 **If you already have a domain:**
-- Check domain match. Mismatch = error, skip, sleep 10, go to Step 1.
+- Check domain match. If mismatch:
+  1. Release the task: `TaskUpdate(task_id, status="pending", owner="")`
+  2. Log the mismatch: `echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [worker-N] [DOMAIN_MISMATCH] task=[subject] my_domain=[domain] task_domain=[task_domain]" >> .claude/logs/activity.log`
+  3. Signal Master-3 for re-routing: `touch .claude/signals/.completion-signal`
+  4. Go to Step 1.
 
 ### Step 4: Claim and work
 
 1. **Claim:** `TaskUpdate(task_id, status="in_progress", owner="worker-N")`
+   Then immediately verify ownership to prevent double-claim:
+   ```
+   TaskGet(task_id)
+   ```
+   If `owner` is NOT "worker-N" (another worker claimed it first), skip this task and go back to Step 1.
 
-2. **Update status** (with lock): status="busy", current_task="[subject]"
+2. **Update status** (with lock, using jq field-level update): status="busy", current_task="[subject]"
+   ```bash
+   bash .claude/scripts/state-lock.sh .claude/state/worker-status.json \
+     'jq ".\"worker-N\".status = \"busy\" | .\"worker-N\".current_task = \"[subject]\"" .claude/state/worker-status.json > /tmp/ws.json && mv /tmp/ws.json .claude/state/worker-status.json'
+   ```
 
 3. **Read recent changes:**
 ```bash
@@ -800,8 +891,9 @@ cat .claude/state/change-summaries.md
 
 2. **Mark task:** `TaskUpdate(task_id, status="completed")`
 
-3. **Signal Master-3:**
+3. **Flush state and signal Master-3:**
 ```bash
+sync 2>/dev/null || true
 touch .claude/signals/.completion-signal
 ```
 
@@ -880,7 +972,8 @@ echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [worker-N] [DISTILL] domain=[domain] budg
 
 ### Step 7: If no task found
 ```bash
-bash .claude/scripts/signal-wait.sh .claude/signals/.worker-signal 10
+# Wait for YOUR specific signal file (replace N with your worker number)
+bash .claude/scripts/signal-wait.sh .claude/signals/.worker-N-signal 10
 ```
 Go back to Step 0.
 
@@ -1217,17 +1310,55 @@ Then **immediately** run `/allocate-loop`.
 description: Ship completed work with error handling.
 ---
 
-1. `git add -A`
-2. `git diff --cached --stat`
-3. **Secret check:** `git diff --cached` — ABORT if you see API keys, tokens, passwords, .env values, or private keys. Say "BLOCKED: secrets detected" and do NOT proceed.
-4. `git commit -m "type(scope): description"`
-5. Push with retry:
+1. **Pre-staging secret scan:** Before staging, scan the working tree for secrets:
    ```bash
-   git push origin HEAD || (git pull --rebase origin HEAD && git push origin HEAD)
+   # Check for API keys, tokens, passwords in unstaged changes
+   git diff | grep -iE '(api[_-]?key|secret[_-]?key|password|token|private[_-]?key|Bearer |AKIA[A-Z0-9]|sk-[a-zA-Z0-9]{20,})' && echo "BLOCKED: secrets detected in diff" && exit 1
    ```
-6. Create PR:
+   If secrets found, say "BLOCKED: secrets detected" and do NOT proceed.
+
+2. `git add -A`
+
+3. **Empty commit check:**
+   ```bash
+   if [ -z "$(git diff --cached --name-only)" ]; then
+       echo "No changes to commit."
+       # Check for existing PR on this branch
+       gh pr view HEAD 2>/dev/null || echo "No existing PR found."
+       exit 0
+   fi
+   ```
+
+4. `git diff --cached --stat`
+
+5. **Post-staging secret check:** `git diff --cached` — ABORT if you see API keys, tokens, passwords, .env values, or private keys. If secrets found post-staging, unstage everything:
+   ```bash
+   git reset HEAD -- .
+   ```
+   Say "BLOCKED: secrets detected" and do NOT proceed.
+
+6. `git commit -m "type(scope): description"`
+
+7. **Push with rebase conflict detection:**
+   ```bash
+   git push origin HEAD
+   if [ $? -ne 0 ]; then
+       if ! git pull --rebase origin HEAD; then
+           # Rebase failed — conflicts detected
+           conflicting_files=$(git diff --name-only --diff-filter=U 2>/dev/null)
+           git rebase --abort
+           echo "ERROR: Merge conflicts detected in: $conflicting_files"
+           echo "Rebase aborted. Manual conflict resolution required."
+           exit 1
+       fi
+       git push origin HEAD
+   fi
+   ```
+
+8. Create PR:
    ```bash
    gh pr create --base $(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@' || echo main) --fill 2>&1
    ```
    If fails, try `gh pr view --web 2>/dev/null` for existing PR.
-7. Report PR URL
+
+9. Report PR URL

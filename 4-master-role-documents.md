@@ -108,7 +108,7 @@ Before doing ANY work, classify the request:
 ## Tier 2 Direct Assignment Protocol
 1. Read `worker-status.json` to find an idle worker
 2. Write a fully-specified task via TaskCreate with `ASSIGNED_TO: worker-N`
-3. Touch `.claude/signals/.worker-signal`
+3. Touch `.claude/signals/.worker-N-signal` (where N is the assigned worker number)
 4. Do NOT write to task-queue.json — this bypasses Master-3 entirely
 5. Log: `[TIER2_ASSIGN] request=[id] worker=[worker-N] task=[subject]`
 
@@ -129,7 +129,7 @@ Before doing ANY work, classify the request:
 ## Signal Files
 Watch: `.claude/signals/.handoff-signal` (new requests)
 Touch after Tier 3 decomposition: `.claude/signals/.task-signal`
-Touch after Tier 2 assignment: `.claude/signals/.worker-signal`
+Touch after Tier 2 assignment: `.claude/signals/.worker-N-signal` (where N is the assigned worker number)
 
 ## Knowledge Curation (Every 2nd Decomposition)
 
@@ -218,7 +218,7 @@ You are the operations manager running on **Sonnet** for speed. You have direct 
 
 ## Signal Files
 Watch: `.claude/signals/.task-signal`, `.claude/signals/.fix-signal`, `.claude/signals/.completion-signal`
-Touch after assignment: `.claude/signals/.worker-signal`
+Touch after assignment: `.claude/signals/.worker-N-signal` (where N is the assigned worker number)
 
 ## Budget-Based Context Tracking
 

@@ -18,12 +18,13 @@
 # USAGE: chmod +x setup.sh && ./setup.sh
 # ============================================================================
 
-set -e
+set -eo pipefail
 
 # Parse arguments
 LAUNCH_GUI=false
 GUI_ONLY=false
 HEADLESS=false
+ARG_LAUNCH=""
 ARG_REPO_URL=""
 ARG_PROJECT_PATH=""
 ARG_WORKERS=""
@@ -33,6 +34,8 @@ for arg in "$@"; do
         --gui) LAUNCH_GUI=true ;;
         --gui-only) GUI_ONLY=true ;;
         --headless) HEADLESS=true ;;
+        --launch) ARG_LAUNCH="Y" ;;
+        --no-launch) ARG_LAUNCH="N" ;;
         --repo-url=*) ARG_REPO_URL="${arg#*=}" ;;
         --project-path=*) ARG_PROJECT_PATH="${arg#*=}" ;;
         --workers=*) ARG_WORKERS="${arg#*=}" ;;
@@ -400,6 +403,11 @@ step "Committing orchestration files..."
 
 default_branch=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@')
 if [ -z "$default_branch" ]; then
+    # Try auto-detecting from remote
+    git remote set-head origin --auto 2>/dev/null || true
+    default_branch=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@')
+fi
+if [ -z "$default_branch" ]; then
     if git show-ref --verify --quiet refs/heads/main 2>/dev/null; then
         default_branch="main"
     elif git show-ref --verify --quiet refs/heads/master 2>/dev/null; then
@@ -409,7 +417,7 @@ if [ -z "$default_branch" ]; then
     fi
 fi
 
-git checkout -b "$default_branch" 2>/dev/null || git checkout "$default_branch" 2>/dev/null || true
+git checkout "$default_branch" 2>/dev/null || git checkout -b "$default_branch" 2>/dev/null || true
 
 git add CLAUDE.md .claude/ .gitignore 2>/dev/null || true
 git commit -m "feat: v2 three-master architecture with tier routing, knowledge system, signal waking" 2>/dev/null || true
@@ -424,33 +432,41 @@ step "Setting up shared state directory..."
 shared_state_dir="$project_path/.claude-shared-state"
 mkdir -p "$shared_state_dir"
 
+# Remove symlink if it exists (clean slate)
 if [ -L ".claude/state" ]; then
     rm -f .claude/state
-    mkdir -p .claude/state
+# Migrate real directory contents to shared dir, then remove
+elif [ -d ".claude/state" ]; then
     for f in handoff.json codebase-map.json worker-status.json fix-queue.json clarification-queue.json task-queue.json agent-health.json worker-lessons.md change-summaries.md; do
-        if [ ! -f "$shared_state_dir/$f" ]; then
-            echo '{}' > ".claude/state/$f"
+        if [ -f ".claude/state/$f" ]; then
+            cp ".claude/state/$f" "$shared_state_dir/$f"
         fi
     done
+    rm -rf .claude/state
 fi
 
+# Ensure all state files exist in shared dir with correct defaults
 for f in handoff.json codebase-map.json worker-status.json fix-queue.json clarification-queue.json task-queue.json agent-health.json worker-lessons.md change-summaries.md; do
-    if [ -f ".claude/state/$f" ] && [ ! -L ".claude/state/$f" ]; then
-        cp ".claude/state/$f" "$shared_state_dir/$f"
-    fi
     if [ ! -f "$shared_state_dir/$f" ]; then
         case "$f" in
             clarification-queue.json) echo '{"questions":[],"responses":[]}' > "$shared_state_dir/$f" ;;
             task-queue.json) echo '{"tasks":[]}' > "$shared_state_dir/$f" ;;
-            agent-health.json) cp .claude/state/agent-health.json "$shared_state_dir/$f" ;;
-            worker-lessons.md) cp "$SCRIPT_DIR/templates/state/worker-lessons.md" "$shared_state_dir/$f" ;;
-            change-summaries.md) cp "$SCRIPT_DIR/templates/state/change-summaries.md" "$shared_state_dir/$f" ;;
+            agent-health.json) cp "$SCRIPT_DIR/templates/state/agent-health.json" "$shared_state_dir/$f" 2>/dev/null || cat > "$shared_state_dir/$f" << 'AHEALTH'
+{
+  "master-2": { "status": "starting", "last_reset": null, "tier1_count": 0, "decomposition_count": 0 },
+  "master-3": { "status": "starting", "last_reset": null, "context_budget": 0, "started_at": null },
+  "workers": {}
+}
+AHEALTH
+            ;;
+            worker-lessons.md) cp "$SCRIPT_DIR/templates/state/worker-lessons.md" "$shared_state_dir/$f" 2>/dev/null || echo "# Worker Lessons Learned" > "$shared_state_dir/$f" ;;
+            change-summaries.md) cp "$SCRIPT_DIR/templates/state/change-summaries.md" "$shared_state_dir/$f" 2>/dev/null || echo "# Change Summaries" > "$shared_state_dir/$f" ;;
             *) echo '{}' > "$shared_state_dir/$f" ;;
         esac
     fi
 done
 
-rm -rf .claude/state
+# Create symlink once
 ln -sf "../.claude-shared-state" .claude/state
 
 if ! grep -qF '.claude-shared-state/' .gitignore 2>/dev/null; then
@@ -471,14 +487,17 @@ for i in $(seq 1 8); do
     [ -d ".worktrees/wt-$i" ] && git worktree remove ".worktrees/wt-$i" --force 2>/dev/null || true
 done
 git worktree prune 2>/dev/null || true
-for i in $(seq 1 $worker_count); do
+for i in $(seq 1 $MAX_WORKERS); do
     git branch -D "agent-$i" 2>/dev/null || true
 done
 rm -rf .worktrees 2>/dev/null || true
 
 mkdir -p .worktrees
 for i in $(seq 1 $worker_count); do
-    git worktree add ".worktrees/wt-$i" -b "agent-$i"
+    if ! git worktree add ".worktrees/wt-$i" -b "agent-$i"; then
+        fail "Failed to create worktree for worker $i. Aborting."
+        exit 1
+    fi
     rm -rf ".worktrees/wt-$i/.claude/state"
     ln -sf "../../../.claude-shared-state" ".worktrees/wt-$i/.claude/state"
     
@@ -507,12 +526,26 @@ step "Generating launcher scripts and manifest..."
 launcher_dir="$project_path/.claude/launchers"
 mkdir -p "$launcher_dir"
 
+# Shell-escape project_path for use in heredocs
+escaped_project_path=$(printf '%q' "$project_path")
+
+# JSON-escape helper: escapes backslashes, quotes, and control chars
+json_escape() {
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//$'\t'/\\t}"
+    s="${s//$'\n'/\\n}"
+    s="${s//$'\r'/\\r}"
+    printf '%s' "$s"
+}
+
 # ── Fresh-start launcher scripts ─────────────────────────────────────
 cat > "$launcher_dir/master-2.sh" << LAUNCHER
 #!/usr/bin/env bash
 clear
 printf '\\n\\033[1;45m\\033[1;37m  ████  I AM MASTER-2 — ARCHITECT (Opus)  ████  \\033[0m\\n\\n'
-cd '$project_path'
+cd ${escaped_project_path}
 exec claude --model opus --dangerously-skip-permissions '/scan-codebase'
 LAUNCHER
 chmod +x "$launcher_dir/master-2.sh"
@@ -521,7 +554,7 @@ cat > "$launcher_dir/master-3.sh" << LAUNCHER
 #!/usr/bin/env bash
 clear
 printf '\\n\\033[1;43m\\033[1;30m  ████  I AM MASTER-3 — ALLOCATOR (Sonnet)  ████  \\033[0m\\n\\n'
-cd '$project_path'
+cd ${escaped_project_path}
 exec claude --model sonnet --dangerously-skip-permissions '/scan-codebase-allocator'
 LAUNCHER
 chmod +x "$launcher_dir/master-3.sh"
@@ -530,17 +563,18 @@ cat > "$launcher_dir/master-1.sh" << LAUNCHER
 #!/usr/bin/env bash
 clear
 printf '\\n\\033[1;42m\\033[1;37m  ████  I AM MASTER-1 — YOUR INTERFACE (Sonnet)  ████  \\033[0m\\n\\n'
-cd '$project_path'
+cd ${escaped_project_path}
 exec claude --model sonnet --dangerously-skip-permissions '/master-loop'
 LAUNCHER
 chmod +x "$launcher_dir/master-1.sh"
 
 for i in $(seq 1 $worker_count); do
+    escaped_wt_path=$(printf '%q' "$project_path/.worktrees/wt-$i")
     cat > "$launcher_dir/worker-$i.sh" << LAUNCHER
 #!/usr/bin/env bash
 clear
 printf '\\n\\033[1;44m\\033[1;37m  ████  I AM WORKER-$i (Opus)  ████  \\033[0m\\n\\n'
-cd '$project_path/.worktrees/wt-$i'
+cd ${escaped_wt_path}
 exec claude --model opus --dangerously-skip-permissions '/worker-loop'
 LAUNCHER
     chmod +x "$launcher_dir/worker-$i.sh"
@@ -553,7 +587,7 @@ cat > "$launcher_dir/master-2-continue.sh" << LAUNCHER
 #!/usr/bin/env bash
 clear
 printf '\\n\\033[1;45m\\033[1;37m  ████  I AM MASTER-2 — ARCHITECT (Opus) [CONTINUE]  ████  \\033[0m\\n\\n'
-cd '$project_path'
+cd ${escaped_project_path}
 exec claude --continue --model opus --dangerously-skip-permissions
 LAUNCHER
 chmod +x "$launcher_dir/master-2-continue.sh"
@@ -562,7 +596,7 @@ cat > "$launcher_dir/master-3-continue.sh" << LAUNCHER
 #!/usr/bin/env bash
 clear
 printf '\\n\\033[1;43m\\033[1;30m  ████  I AM MASTER-3 — ALLOCATOR (Sonnet) [CONTINUE]  ████  \\033[0m\\n\\n'
-cd '$project_path'
+cd ${escaped_project_path}
 exec claude --continue --model sonnet --dangerously-skip-permissions
 LAUNCHER
 chmod +x "$launcher_dir/master-3-continue.sh"
@@ -571,17 +605,18 @@ cat > "$launcher_dir/master-1-continue.sh" << LAUNCHER
 #!/usr/bin/env bash
 clear
 printf '\\n\\033[1;42m\\033[1;37m  ████  I AM MASTER-1 — YOUR INTERFACE (Sonnet) [CONTINUE]  ████  \\033[0m\\n\\n'
-cd '$project_path'
+cd ${escaped_project_path}
 exec claude --continue --model sonnet --dangerously-skip-permissions
 LAUNCHER
 chmod +x "$launcher_dir/master-1-continue.sh"
 
 for i in $(seq 1 $worker_count); do
+    escaped_wt_path=$(printf '%q' "$project_path/.worktrees/wt-$i")
     cat > "$launcher_dir/worker-$i-continue.sh" << LAUNCHER
 #!/usr/bin/env bash
 clear
 printf '\\n\\033[1;44m\\033[1;37m  ████  I AM WORKER-$i (Opus) [CONTINUE]  ████  \\033[0m\\n\\n'
-cd '$project_path/.worktrees/wt-$i'
+cd ${escaped_wt_path}
 exec claude --continue --model opus --dangerously-skip-permissions
 LAUNCHER
     chmod +x "$launcher_dir/worker-$i-continue.sh"
@@ -590,10 +625,13 @@ done
 ok "Continue-mode launcher scripts written"
 
 # ── Generate manifest.json for GUI ───────────────────────────────────
+json_project_path=$(json_escape "$project_path")
+json_launcher_dir=$(json_escape "$launcher_dir")
+
 cat > "$launcher_dir/manifest.json" << MANIFEST
 {
   "version": 2,
-  "project_path": "$project_path",
+  "project_path": "${json_project_path}",
   "worker_count": $worker_count,
   "created_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "agents": [
@@ -602,9 +640,9 @@ cat > "$launcher_dir/manifest.json" << MANIFEST
       "group": "masters",
       "role": "Interface (Sonnet)",
       "model": "sonnet",
-      "cwd": "$project_path",
-      "launcher": "$launcher_dir/master-1.sh",
-      "launcher_continue": "$launcher_dir/master-1-continue.sh",
+      "cwd": "${json_project_path}",
+      "launcher": "${json_launcher_dir}/master-1.sh",
+      "launcher_continue": "${json_launcher_dir}/master-1-continue.sh",
       "command_fresh": "claude --model sonnet --dangerously-skip-permissions '/master-loop'",
       "command_continue": "claude --continue --model sonnet --dangerously-skip-permissions"
     },
@@ -613,9 +651,9 @@ cat > "$launcher_dir/manifest.json" << MANIFEST
       "group": "masters",
       "role": "Architect (Opus)",
       "model": "opus",
-      "cwd": "$project_path",
-      "launcher": "$launcher_dir/master-2.sh",
-      "launcher_continue": "$launcher_dir/master-2-continue.sh",
+      "cwd": "${json_project_path}",
+      "launcher": "${json_launcher_dir}/master-2.sh",
+      "launcher_continue": "${json_launcher_dir}/master-2-continue.sh",
       "command_fresh": "claude --model opus --dangerously-skip-permissions '/scan-codebase'",
       "command_continue": "claude --continue --model opus --dangerously-skip-permissions"
     },
@@ -624,20 +662,24 @@ cat > "$launcher_dir/manifest.json" << MANIFEST
       "group": "masters",
       "role": "Allocator (Sonnet)",
       "model": "sonnet",
-      "cwd": "$project_path",
-      "launcher": "$launcher_dir/master-3.sh",
-      "launcher_continue": "$launcher_dir/master-3-continue.sh",
+      "cwd": "${json_project_path}",
+      "launcher": "${json_launcher_dir}/master-3.sh",
+      "launcher_continue": "${json_launcher_dir}/master-3-continue.sh",
       "command_fresh": "claude --model sonnet --dangerously-skip-permissions '/scan-codebase-allocator'",
       "command_continue": "claude --continue --model sonnet --dangerously-skip-permissions"
-    }$(for i in $(seq 1 $worker_count); do echo ",
+    }$(for i in $(seq 1 $worker_count); do
+      json_wt_path=$(json_escape "$project_path/.worktrees/wt-$i")
+      json_w_launcher=$(json_escape "$launcher_dir/worker-$i.sh")
+      json_w_launcher_cont=$(json_escape "$launcher_dir/worker-$i-continue.sh")
+      echo ",
     {
       \"id\": \"worker-$i\",
       \"group\": \"workers\",
       \"role\": \"Worker $i (Opus)\",
       \"model\": \"opus\",
-      \"cwd\": \"$project_path/.worktrees/wt-$i\",
-      \"launcher\": \"$launcher_dir/worker-$i.sh\",
-      \"launcher_continue\": \"$launcher_dir/worker-$i-continue.sh\",
+      \"cwd\": \"${json_wt_path}\",
+      \"launcher\": \"${json_w_launcher}\",
+      \"launcher_continue\": \"${json_w_launcher_cont}\",
       \"command_fresh\": \"claude --model opus --dangerously-skip-permissions '/worker-loop'\",
       \"command_continue\": \"claude --continue --model opus --dangerously-skip-permissions\"
     }"; done)
@@ -670,9 +712,11 @@ echo ""
 echo "TERMINALS NEEDED: $((worker_count + 3))"
 echo ""
 
-# In headless mode, launching depends on session-mode argument
+# In headless mode, launching depends on --launch/--no-launch or --session-mode argument
 if [ "$HEADLESS" = true ]; then
-    if [ -n "$ARG_SESSION_MODE" ]; then
+    if [ -n "$ARG_LAUNCH" ]; then
+        launch="$ARG_LAUNCH"
+    elif [ -n "$ARG_SESSION_MODE" ]; then
         launch="Y"
     else
         launch="N"
@@ -748,6 +792,13 @@ HEALTH
         rm -f "$project_path/.claude/signals/"* 2>/dev/null || true
         
         mkdir -p "$project_path/.claude/logs"
+        # Rotate activity.log if it exceeds 500KB
+        if [ -f "$project_path/.claude/logs/activity.log" ]; then
+            log_size=$(wc -c < "$project_path/.claude/logs/activity.log" 2>/dev/null || echo 0)
+            if [ "$log_size" -gt 512000 ]; then
+                mv "$project_path/.claude/logs/activity.log" "$project_path/.claude/logs/activity.log.1"
+            fi
+        fi
         echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [setup] [FRESH_RESET] All sessions wiped (knowledge preserved)" > "$project_path/.claude/logs/activity.log"
         
         CLAUDE_SESSION_FLAG=""
@@ -774,9 +825,12 @@ HEALTH
         w_suffix=""
     fi
     
-    # ── Terminal creation (macOS) ─────────────────────────────────────
-    merge_visible_windows() {
-        osascript << 'MERGE_SCRIPT'
+    # ── Terminal creation (platform-aware) ──────────────────────────────
+    case "$OSTYPE" in
+    darwin*)
+        # macOS: Terminal.app with tab merging
+        merge_visible_windows() {
+            osascript << 'MERGE_SCRIPT'
 tell application "Terminal" to activate
 delay 0.5
 tell application "System Events"
@@ -785,74 +839,146 @@ tell application "System Events"
     end tell
 end tell
 MERGE_SCRIPT
-    }
-    
-    step "  Preparing setup window..."
-    SETUP_WIN_ID=$(osascript -e 'tell application "Terminal" to return id of front window')
-    osascript -e "tell application \"Terminal\" to set miniaturized of window id $SETUP_WIN_ID to true"
-    sleep 1
-    ok "  Setup window minimized (ID: $SETUP_WIN_ID)"
-    
-    step "  Creating master windows..."
-    
-    osascript -e "tell application \"Terminal\"
-        activate
-        do script \"$m2_launcher\"
-    end tell"
-    sleep 2
-    
-    osascript -e "tell application \"Terminal\"
-        do script \"$m3_launcher\"
-    end tell"
-    sleep 2
-    
-    osascript -e "tell application \"Terminal\"
-        do script \"$m1_launcher\"
-    end tell"
-    sleep 2
-    
-    ok "  3 master windows created"
-    
-    step "  Merging masters into tabs..."
-    merge_visible_windows
-    sleep 2
-    
-    MASTER_WIN_ID=$(osascript -e 'tell application "Terminal" to return id of front window')
-    MASTER_TAB_COUNT=$(osascript -e "tell application \"Terminal\" to return count of tabs of window id $MASTER_WIN_ID")
-    ok "  Masters merged: $MASTER_TAB_COUNT tabs in window $MASTER_WIN_ID"
-    
-    osascript -e "tell application \"Terminal\" to set miniaturized of window id $MASTER_WIN_ID to true"
-    sleep 1
-    
-    step "  Creating worker windows..."
-    
-    for i in $(seq 1 $worker_count); do
+        }
+
+        step "  Preparing setup window..."
+        SETUP_WIN_ID=$(osascript -e 'tell application "Terminal" to return id of front window')
+        osascript -e "tell application \"Terminal\" to set miniaturized of window id $SETUP_WIN_ID to true"
+        sleep 1
+        ok "  Setup window minimized (ID: $SETUP_WIN_ID)"
+
+        step "  Creating master windows..."
+
         osascript -e "tell application \"Terminal\"
             activate
-            do script \"$launcher_dir/worker-${i}${w_suffix}.sh\"
+            do script \"$m2_launcher\"
         end tell"
         sleep 2
-    done
-    
-    ok "  $worker_count worker windows created"
-    
-    if [ "$worker_count" -gt 1 ]; then
-        step "  Merging workers into tabs..."
+
+        osascript -e "tell application \"Terminal\"
+            do script \"$m3_launcher\"
+        end tell"
+        sleep 2
+
+        osascript -e "tell application \"Terminal\"
+            do script \"$m1_launcher\"
+        end tell"
+        sleep 2
+
+        ok "  3 master windows created"
+
+        step "  Merging masters into tabs..."
         merge_visible_windows
         sleep 2
-    fi
-    
-    WORKER_WIN_ID=$(osascript -e 'tell application "Terminal" to return id of front window')
-    WORKER_TAB_COUNT=$(osascript -e "tell application \"Terminal\" to return count of tabs of window id $WORKER_WIN_ID")
-    ok "  Workers merged: $WORKER_TAB_COUNT tabs in window $WORKER_WIN_ID"
-    
-    step "  Restoring windows..."
-    osascript -e "tell application \"Terminal\"
-        set miniaturized of window id $MASTER_WIN_ID to false
-        set miniaturized of window id $SETUP_WIN_ID to false
-    end tell" 2>/dev/null || true
-    sleep 1
-    ok "  All windows restored"
+
+        MASTER_WIN_ID=$(osascript -e 'tell application "Terminal" to return id of front window')
+        MASTER_TAB_COUNT=$(osascript -e "tell application \"Terminal\" to return count of tabs of window id $MASTER_WIN_ID")
+        ok "  Masters merged: $MASTER_TAB_COUNT tabs in window $MASTER_WIN_ID"
+
+        osascript -e "tell application \"Terminal\" to set miniaturized of window id $MASTER_WIN_ID to true"
+        sleep 1
+
+        step "  Creating worker windows..."
+
+        for i in $(seq 1 $worker_count); do
+            osascript -e "tell application \"Terminal\"
+                activate
+                do script \"$launcher_dir/worker-${i}${w_suffix}.sh\"
+            end tell"
+            sleep 2
+        done
+
+        ok "  $worker_count worker windows created"
+
+        if [ "$worker_count" -gt 1 ]; then
+            step "  Merging workers into tabs..."
+            merge_visible_windows
+            sleep 2
+        fi
+
+        WORKER_WIN_ID=$(osascript -e 'tell application "Terminal" to return id of front window')
+        WORKER_TAB_COUNT=$(osascript -e "tell application \"Terminal\" to return count of tabs of window id $WORKER_WIN_ID")
+        ok "  Workers merged: $WORKER_TAB_COUNT tabs in window $WORKER_WIN_ID"
+
+        step "  Restoring windows..."
+        osascript -e "tell application \"Terminal\"
+            set miniaturized of window id $MASTER_WIN_ID to false
+            set miniaturized of window id $SETUP_WIN_ID to false
+        end tell" 2>/dev/null || true
+        sleep 1
+        ok "  All windows restored"
+        ;;
+    linux*)
+        # Linux: try gnome-terminal, konsole, xterm, or tmux
+        step "  Launching terminals (Linux)..."
+        if command -v gnome-terminal &>/dev/null; then
+            gnome-terminal --tab -- bash "$m2_launcher" 2>/dev/null
+            gnome-terminal --tab -- bash "$m3_launcher" 2>/dev/null
+            gnome-terminal --tab -- bash "$m1_launcher" 2>/dev/null
+            for i in $(seq 1 $worker_count); do
+                gnome-terminal --tab -- bash "$launcher_dir/worker-${i}${w_suffix}.sh" 2>/dev/null
+            done
+            ok "  Launched via gnome-terminal"
+        elif command -v konsole &>/dev/null; then
+            konsole --new-tab -e bash "$m2_launcher" 2>/dev/null &
+            konsole --new-tab -e bash "$m3_launcher" 2>/dev/null &
+            konsole --new-tab -e bash "$m1_launcher" 2>/dev/null &
+            for i in $(seq 1 $worker_count); do
+                konsole --new-tab -e bash "$launcher_dir/worker-${i}${w_suffix}.sh" 2>/dev/null &
+            done
+            ok "  Launched via konsole"
+        elif command -v xterm &>/dev/null; then
+            xterm -e bash "$m2_launcher" &
+            xterm -e bash "$m3_launcher" &
+            xterm -e bash "$m1_launcher" &
+            for i in $(seq 1 $worker_count); do
+                xterm -e bash "$launcher_dir/worker-${i}${w_suffix}.sh" &
+            done
+            ok "  Launched via xterm"
+        elif command -v tmux &>/dev/null; then
+            tmux new-session -d -s masters bash "$m2_launcher"
+            tmux split-window -t masters bash "$m3_launcher"
+            tmux split-window -t masters bash "$m1_launcher"
+            tmux select-layout -t masters tiled
+            tmux new-session -d -s workers bash "$launcher_dir/worker-1${w_suffix}.sh"
+            for i in $(seq 2 $worker_count); do
+                tmux split-window -t workers bash "$launcher_dir/worker-${i}${w_suffix}.sh"
+            done
+            tmux select-layout -t workers tiled
+            ok "  Launched via tmux (sessions: masters, workers)"
+            echo "   Attach with: tmux attach -t masters"
+        else
+            skip "  No supported terminal found. Run launcher scripts manually:"
+            echo "    $m2_launcher"
+            echo "    $m3_launcher"
+            echo "    $m1_launcher"
+            for i in $(seq 1 $worker_count); do
+                echo "    $launcher_dir/worker-${i}${w_suffix}.sh"
+            done
+        fi
+        ;;
+    msys*|mingw*|cygwin*)
+        # Windows (Git Bash, MSYS2, Cygwin)
+        step "  Launching terminals (Windows)..."
+        cmd.exe /c start bash "$m2_launcher" 2>/dev/null || start bash "$m2_launcher" 2>/dev/null &
+        cmd.exe /c start bash "$m3_launcher" 2>/dev/null || start bash "$m3_launcher" 2>/dev/null &
+        cmd.exe /c start bash "$m1_launcher" 2>/dev/null || start bash "$m1_launcher" 2>/dev/null &
+        for i in $(seq 1 $worker_count); do
+            cmd.exe /c start bash "$launcher_dir/worker-${i}${w_suffix}.sh" 2>/dev/null || start bash "$launcher_dir/worker-${i}${w_suffix}.sh" 2>/dev/null &
+        done
+        ok "  Launched via cmd.exe"
+        ;;
+    *)
+        # Unknown platform: print paths for manual execution
+        skip "  Unsupported platform ($OSTYPE). Run these launcher scripts manually:"
+        echo "    $m2_launcher"
+        echo "    $m3_launcher"
+        echo "    $m1_launcher"
+        for i in $(seq 1 $worker_count); do
+            echo "    $launcher_dir/worker-${i}${w_suffix}.sh"
+        done
+        ;;
+    esac
     
     echo ""
     echo -e "${GREEN}========================================${NC}"
