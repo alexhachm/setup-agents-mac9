@@ -42,10 +42,13 @@ User → Master-1 (Sonnet) → Master-2 (Opus) triage:
          └─ Tier 3: M2 → Master-3 → Workers  (~20-60 min)
 ```
 
-## Previous Versions
+## Archive
 
-| Directory | Version |
-|-----------|---------|
-| `setup-agents-mac7/` | v2 (Mac/Linux only, predecessor) |
+Older versions and redundant root-level docs are preserved in `archive/`:
+
+| Path | Description |
+|------|-------------|
+| `archive/setup-agents-mac7/` | v2 (Mac/Linux only, predecessor) |
+| `archive/1-setup.sh` … `archive/5-command-loops.md` | Root-level copies of the doc breakdown (superseded by the per-platform packages) |
 
 Each file in the breakdown clearly marks its original `FILE:` path with headers.
