@@ -12,7 +12,7 @@
 #   - Restored v7 content lost in v7→v8 rewrite (see README.md)
 #   - Fixed Tier 2 race condition with claim-before-assign protocol
 #   - Made Master-3 role doc self-contained (no "Same as v1" stubs)
-#   - Restored cross-platform launchers (.bat/.ps1)
+#   - Cross-platform launchers moved to setup-agents-windows9/
 #   - Restored qualitative self-monitoring alongside counter-based triggers
 #   - Restored adaptive polling within signal framework
 #   - Restored escalation paths, emergency commands, task protocol quick-ref
@@ -605,36 +605,6 @@ done
 
 ok "Continue-mode launcher scripts written"
 
-# ── Cross-platform launchers (.bat + .ps1) ───────────────────────────
-step "Generating cross-platform launcher scripts..."
-
-for agent_sh in "$launcher_dir"/*.sh; do
-    agent_name=$(basename "$agent_sh" .sh)
-    # Skip continue scripts for .bat/.ps1 (they get their own)
-    agent_cwd=$(grep "^cd " "$agent_sh" | sed "s/^cd '//;s/'$//")
-    agent_cmd=$(grep "^exec " "$agent_sh" | sed "s/^exec //")
-    agent_upper=$(echo "$agent_name" | tr '[:lower:]' '[:upper:]' | tr '-' ' ')
-
-    cat > "$launcher_dir/$agent_name.bat" << BATCH
-@echo off
-cls
-echo.
-echo   ████  I AM ${agent_upper}  ████
-echo.
-cd /d "$agent_cwd"
-$agent_cmd
-BATCH
-
-    cat > "$launcher_dir/$agent_name.ps1" << PWSH
-Clear-Host
-Write-Host "\`n  ████  I AM ${agent_upper}  ████\`n" -ForegroundColor Cyan
-Set-Location "$agent_cwd"
-& $agent_cmd
-PWSH
-done
-
-ok "Cross-platform launcher scripts written (.sh, .bat, .ps1)"
-
 # ── Generate manifest.json for GUI ───────────────────────────────────
 cat > "$launcher_dir/manifest.json" << MANIFEST
 {
@@ -651,7 +621,6 @@ cat > "$launcher_dir/manifest.json" << MANIFEST
       "cwd": "$project_path",
       "launcher": "$launcher_dir/master-1.sh",
       "launcher_continue": "$launcher_dir/master-1-continue.sh",
-      "launcher_win": "$launcher_dir/master-1.bat",
       "command_fresh": "claude --model sonnet --dangerously-skip-permissions '/master-loop'",
       "command_continue": "claude --continue --model sonnet --dangerously-skip-permissions"
     },
@@ -663,7 +632,6 @@ cat > "$launcher_dir/manifest.json" << MANIFEST
       "cwd": "$project_path",
       "launcher": "$launcher_dir/master-2.sh",
       "launcher_continue": "$launcher_dir/master-2-continue.sh",
-      "launcher_win": "$launcher_dir/master-2.bat",
       "command_fresh": "claude --model opus --dangerously-skip-permissions '/scan-codebase'",
       "command_continue": "claude --continue --model opus --dangerously-skip-permissions"
     },
@@ -675,7 +643,6 @@ cat > "$launcher_dir/manifest.json" << MANIFEST
       "cwd": "$project_path",
       "launcher": "$launcher_dir/master-3.sh",
       "launcher_continue": "$launcher_dir/master-3-continue.sh",
-      "launcher_win": "$launcher_dir/master-3.bat",
       "command_fresh": "claude --model sonnet --dangerously-skip-permissions '/scan-codebase-allocator'",
       "command_continue": "claude --continue --model sonnet --dangerously-skip-permissions"
     }$(for i in $(seq 1 $worker_count); do echo ",
@@ -687,7 +654,6 @@ cat > "$launcher_dir/manifest.json" << MANIFEST
       \"cwd\": \"$project_path/.worktrees/wt-$i\",
       \"launcher\": \"$launcher_dir/worker-$i.sh\",
       \"launcher_continue\": \"$launcher_dir/worker-$i-continue.sh\",
-      \"launcher_win\": \"$launcher_dir/worker-$i.bat\",
       \"command_fresh\": \"claude --model opus --dangerously-skip-permissions '/worker-loop'\",
       \"command_continue\": \"claude --continue --model opus --dangerously-skip-permissions\"
     }"; done)

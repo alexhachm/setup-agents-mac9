@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(*)", "Read(*)", "Write(*)", "Edit(*)", "MultiEdit(*)",
+      "Grep(*)", "Glob(*)", "Task(*)", "TaskList(*)", "TaskCreate(*)", "TaskUpdate(*)"
+    ],
+    "deny": ["Bash(rm -rf /)", "Bash(rm -rf ~)", "Bash(git push --force)"]
+  },
+  "hooks": {
+    "PreToolUse": [{
+      "matcher": "Edit|Write|MultiEdit|Read",
+      "hooks": [{"type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/pre-tool-secret-guard.sh\""}]
+    }],
+    "Stop": [{
+      "matcher": "",
+      "hooks": [{"type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/stop-notify.sh\""}]
+    }]
+  }
+}

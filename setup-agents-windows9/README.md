@@ -1,15 +1,27 @@
-# Multi-Agent Claude Code Workspace v3 — Mac/Linux
+# Multi-Agent Claude Code Workspace v3 — Windows
 
-This folder contains the multi-agent orchestration system for **Mac/Linux**. For Windows, see `../setup-agents-windows9/`.
+This folder contains the multi-agent orchestration system for **Windows**. For Mac/Linux, see `../setup-agents-mac9/`.
 
 ## Quick Start
 
-```bash
-chmod +x 1-setup.sh && ./1-setup.sh
+```powershell
+# Run from PowerShell
+powershell -ExecutionPolicy Bypass -File setup.ps1
 
 # Headless example
-./1-setup.sh --headless --repo-url="https://github.com/user/repo" --workers=3 --session-mode=1
+powershell -ExecutionPolicy Bypass -File setup.ps1 -Headless -RepoUrl "https://github.com/user/repo" -Workers 3 -SessionMode 1
 ```
+
+## Prerequisites
+
+```powershell
+winget install Git.Git
+winget install OpenJS.NodeJS
+winget install GitHub.cli
+npm install -g @anthropic-ai/claude-code
+```
+
+Windows Terminal (`wt`) is recommended for tabbed agent windows but not required — the installer falls back to separate PowerShell windows.
 
 ## v3 Changelog (vs v8)
 
@@ -31,7 +43,7 @@ chmod +x 1-setup.sh && ./1-setup.sh
 ### Kept from v8
 - Modular 5-file structure
 - Tier-based routing (Tier 1/2/3)
-- Signal-based waking (fswatch/inotifywait + polling fallback)
+- Signal-based waking (polling-based on Windows)
 - Living knowledge system with curation + instruction patching
 - Budget-based context tracking with pre-reset distillation
 - Reset staggering via agent-health.json
@@ -42,8 +54,8 @@ chmod +x 1-setup.sh && ./1-setup.sh
 
 | # | File | What's Inside | Purpose |
 |---|------|--------------|---------|
-| 1 | `1-setup.sh` | **Main installer script (Mac/Linux)** — preflight, project setup, directories, state init, worktrees, launchers, terminal launch via osascript | Executable installer |
-| 2 | `2-helper-scripts.sh` | **Runtime scripts** — `signal-wait.sh`, `state-lock.sh`, `pre-tool-secret-guard.sh`, `stop-notify.sh` | Runtime support |
+| 1 | `setup.ps1` | **Main installer script (Windows)** — preflight, project setup, directories, state init, worktrees, launchers (`.ps1`/`.bat`), terminal launch via Windows Terminal or PowerShell | Executable installer |
+| 2 | `2-helper-scripts.sh` | **Runtime scripts** — `signal-wait.sh`, `state-lock.sh`, `pre-tool-secret-guard.sh`, `stop-notify.sh` (run via Git Bash) | Runtime support |
 | 3 | `3-project-config-and-templates.md` | **Project config** — `root-claude.md`, `worker-claude.md`, subagents, `settings.json`, knowledge templates, state templates | Template content |
 | 4 | `4-master-role-documents.md` | **Role docs** — Master-1 (Interface), Master-2 (Architect), Master-3 (Allocator) full self-contained specifications | Agent identity |
 | 5 | `5-command-loops.md` | **Commands** — `master-loop`, `architect-loop`, `allocate-loop`, `worker-loop`, `scan-codebase`, `scan-codebase-allocator`, `commit-push-pr` | Agent behavior |
@@ -59,14 +71,14 @@ User → Master-1 (Sonnet) → Master-2 (Opus) triage:
 
 ## How to Reassemble
 
-`1-setup.sh` expects this directory layout alongside it:
+`setup.ps1` expects this directory layout alongside it:
 
 ```
-├── 1-setup.sh
+├── setup.ps1
 ├── scripts/
-│   ├── signal-wait.sh
-│   ├── state-lock.sh
-│   ├── add-worker.sh
+│   ├── signal-wait.sh    (Git Bash)
+│   ├── state-lock.sh     (Git Bash)
+│   ├── add-worker.sh     (Git Bash)
 │   └── hooks/
 │       ├── pre-tool-secret-guard.sh
 │       └── stop-notify.sh
@@ -102,5 +114,16 @@ User → Master-1 (Sonnet) → Master-2 (Opus) triage:
 │       └── change-summaries.md
 └── gui/  (Electron control center)
 ```
+
+## Windows-Specific Notes
+
+| Feature | Implementation |
+|---------|---------------|
+| Shared state links | `New-Item -ItemType Junction` (no admin needed) |
+| Terminal tabs | Windows Terminal `wt -w <name> new-tab` |
+| Terminal fallback | `Start-Process powershell` (separate windows) |
+| Filesystem watcher | Not checked (agents use polling) |
+| Argument style | `-RepoUrl VALUE` (PowerShell params) |
+| Install hint | `winget install Git.Git` etc. |
 
 Each file in this breakdown marks its original `FILE:` path with headers.

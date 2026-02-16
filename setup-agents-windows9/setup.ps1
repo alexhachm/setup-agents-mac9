@@ -7,7 +7,7 @@
 #   - Master-3 (Sonnet): Allocator (domain map, routes tasks, monitors workers)
 #   - Workers 1-8 (Opus): Isolated context per domain, strict grouping
 #
-# Native Windows PowerShell equivalent of 1-setup.sh
+# Native Windows PowerShell installer (Windows-only package)
 #
 # USAGE: powershell -ExecutionPolicy Bypass -File setup.ps1
 # ============================================================================
@@ -574,90 +574,8 @@ Step "Generating launcher scripts and manifest..."
 $launcherDir = Join-Path $projectPath ".claude\launchers"
 if (-not (Test-Path $launcherDir)) { New-Item -ItemType Directory -Path $launcherDir -Force | Out-Null }
 
-# ── Fresh-start launcher scripts (Unix .sh) ──────────────────────────────
-$master2Sh = @"
-#!/usr/bin/env bash
-clear
-printf '\n\033[1;45m\033[1;37m  ████  I AM MASTER-2 — ARCHITECT (Opus)  ████  \033[0m\n\n'
-cd '$projectPath'
-exec claude --model opus --dangerously-skip-permissions '/scan-codebase'
-"@
-$master2Sh | Set-Content (Join-Path $launcherDir "master-2.sh") -NoNewline
-
-$master3Sh = @"
-#!/usr/bin/env bash
-clear
-printf '\n\033[1;43m\033[1;30m  ████  I AM MASTER-3 — ALLOCATOR (Sonnet)  ████  \033[0m\n\n'
-cd '$projectPath'
-exec claude --model sonnet --dangerously-skip-permissions '/scan-codebase-allocator'
-"@
-$master3Sh | Set-Content (Join-Path $launcherDir "master-3.sh") -NoNewline
-
-$master1Sh = @"
-#!/usr/bin/env bash
-clear
-printf '\n\033[1;42m\033[1;37m  ████  I AM MASTER-1 — YOUR INTERFACE (Sonnet)  ████  \033[0m\n\n'
-cd '$projectPath'
-exec claude --model sonnet --dangerously-skip-permissions '/master-loop'
-"@
-$master1Sh | Set-Content (Join-Path $launcherDir "master-1.sh") -NoNewline
-
-for ($i = 1; $i -le $workerCount; $i++) {
-    $workerSh = @"
-#!/usr/bin/env bash
-clear
-printf '\n\033[1;44m\033[1;37m  ████  I AM WORKER-$i (Opus)  ████  \033[0m\n\n'
-cd '$projectPath/.worktrees/wt-$i'
-exec claude --model opus --dangerously-skip-permissions '/worker-loop'
-"@
-    $workerSh | Set-Content (Join-Path $launcherDir "worker-$i.sh") -NoNewline
-}
-
-Ok "Fresh-start launcher scripts written (.sh)"
-
-# ── Continue-mode launcher scripts (Unix .sh) ────────────────────────────
-$master2ContSh = @"
-#!/usr/bin/env bash
-clear
-printf '\n\033[1;45m\033[1;37m  ████  I AM MASTER-2 — ARCHITECT (Opus) [CONTINUE]  ████  \033[0m\n\n'
-cd '$projectPath'
-exec claude --continue --model opus --dangerously-skip-permissions
-"@
-$master2ContSh | Set-Content (Join-Path $launcherDir "master-2-continue.sh") -NoNewline
-
-$master3ContSh = @"
-#!/usr/bin/env bash
-clear
-printf '\n\033[1;43m\033[1;30m  ████  I AM MASTER-3 — ALLOCATOR (Sonnet) [CONTINUE]  ████  \033[0m\n\n'
-cd '$projectPath'
-exec claude --continue --model sonnet --dangerously-skip-permissions
-"@
-$master3ContSh | Set-Content (Join-Path $launcherDir "master-3-continue.sh") -NoNewline
-
-$master1ContSh = @"
-#!/usr/bin/env bash
-clear
-printf '\n\033[1;42m\033[1;37m  ████  I AM MASTER-1 — YOUR INTERFACE (Sonnet) [CONTINUE]  ████  \033[0m\n\n'
-cd '$projectPath'
-exec claude --continue --model sonnet --dangerously-skip-permissions
-"@
-$master1ContSh | Set-Content (Join-Path $launcherDir "master-1-continue.sh") -NoNewline
-
-for ($i = 1; $i -le $workerCount; $i++) {
-    $workerContSh = @"
-#!/usr/bin/env bash
-clear
-printf '\n\033[1;44m\033[1;37m  ████  I AM WORKER-$i (Opus) [CONTINUE]  ████  \033[0m\n\n'
-cd '$projectPath/.worktrees/wt-$i'
-exec claude --continue --model opus --dangerously-skip-permissions
-"@
-    $workerContSh | Set-Content (Join-Path $launcherDir "worker-$i-continue.sh") -NoNewline
-}
-
-Ok "Continue-mode launcher scripts written (.sh)"
-
 # ── Fresh-start launcher scripts (PowerShell .ps1) ────────────────────────
-Step "Generating cross-platform launcher scripts..."
+Step "Generating launcher scripts..."
 
 # Master-2 .ps1
 @"
@@ -809,7 +727,7 @@ claude --continue --model opus --dangerously-skip-permissions
 "@ | Set-Content (Join-Path $launcherDir "worker-$i-continue.bat")
 }
 
-Ok "Cross-platform launcher scripts written (.sh, .bat, .ps1)"
+Ok "Launcher scripts written (.bat, .ps1)"
 
 # ── Generate manifest.json for GUI ───────────────────────────────────
 $manifestTimestamp = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
@@ -817,17 +735,17 @@ $manifestTimestamp = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ
 $workerEntries = @()
 for ($i = 1; $i -le $workerCount; $i++) {
     $workerEntries += @{
-        id                = "worker-$i"
-        group             = "workers"
-        role              = "Worker $i (Opus)"
-        model             = "opus"
-        cwd               = "$projectPath\.worktrees\wt-$i"
-        launcher          = "$launcherDir\worker-$i.sh"
-        launcher_continue = "$launcherDir\worker-$i-continue.sh"
-        launcher_win      = "$launcherDir\worker-$i.bat"
-        launcher_ps1      = "$launcherDir\worker-$i.ps1"
-        command_fresh     = "claude --model opus --dangerously-skip-permissions '/worker-loop'"
-        command_continue  = "claude --continue --model opus --dangerously-skip-permissions"
+        id                    = "worker-$i"
+        group                 = "workers"
+        role                  = "Worker $i (Opus)"
+        model                 = "opus"
+        cwd                   = "$projectPath\.worktrees\wt-$i"
+        launcher_win          = "$launcherDir\worker-$i.bat"
+        launcher_win_continue = "$launcherDir\worker-$i-continue.bat"
+        launcher_ps1          = "$launcherDir\worker-$i.ps1"
+        launcher_ps1_continue = "$launcherDir\worker-$i-continue.ps1"
+        command_fresh         = "claude --model opus --dangerously-skip-permissions '/worker-loop'"
+        command_continue      = "claude --continue --model opus --dangerously-skip-permissions"
     }
 }
 
@@ -838,43 +756,43 @@ $manifest = @{
     created_at   = $manifestTimestamp
     agents       = @(
         @{
-            id                = "master-1"
-            group             = "masters"
-            role              = "Interface (Sonnet)"
-            model             = "sonnet"
-            cwd               = $projectPath
-            launcher          = "$launcherDir\master-1.sh"
-            launcher_continue = "$launcherDir\master-1-continue.sh"
-            launcher_win      = "$launcherDir\master-1.bat"
-            launcher_ps1      = "$launcherDir\master-1.ps1"
-            command_fresh     = "claude --model sonnet --dangerously-skip-permissions '/master-loop'"
-            command_continue  = "claude --continue --model sonnet --dangerously-skip-permissions"
+            id                    = "master-1"
+            group                 = "masters"
+            role                  = "Interface (Sonnet)"
+            model                 = "sonnet"
+            cwd                   = $projectPath
+            launcher_win          = "$launcherDir\master-1.bat"
+            launcher_win_continue = "$launcherDir\master-1-continue.bat"
+            launcher_ps1          = "$launcherDir\master-1.ps1"
+            launcher_ps1_continue = "$launcherDir\master-1-continue.ps1"
+            command_fresh         = "claude --model sonnet --dangerously-skip-permissions '/master-loop'"
+            command_continue      = "claude --continue --model sonnet --dangerously-skip-permissions"
         },
         @{
-            id                = "master-2"
-            group             = "masters"
-            role              = "Architect (Opus)"
-            model             = "opus"
-            cwd               = $projectPath
-            launcher          = "$launcherDir\master-2.sh"
-            launcher_continue = "$launcherDir\master-2-continue.sh"
-            launcher_win      = "$launcherDir\master-2.bat"
-            launcher_ps1      = "$launcherDir\master-2.ps1"
-            command_fresh     = "claude --model opus --dangerously-skip-permissions '/scan-codebase'"
-            command_continue  = "claude --continue --model opus --dangerously-skip-permissions"
+            id                    = "master-2"
+            group                 = "masters"
+            role                  = "Architect (Opus)"
+            model                 = "opus"
+            cwd                   = $projectPath
+            launcher_win          = "$launcherDir\master-2.bat"
+            launcher_win_continue = "$launcherDir\master-2-continue.bat"
+            launcher_ps1          = "$launcherDir\master-2.ps1"
+            launcher_ps1_continue = "$launcherDir\master-2-continue.ps1"
+            command_fresh         = "claude --model opus --dangerously-skip-permissions '/scan-codebase'"
+            command_continue      = "claude --continue --model opus --dangerously-skip-permissions"
         },
         @{
-            id                = "master-3"
-            group             = "masters"
-            role              = "Allocator (Sonnet)"
-            model             = "sonnet"
-            cwd               = $projectPath
-            launcher          = "$launcherDir\master-3.sh"
-            launcher_continue = "$launcherDir\master-3-continue.sh"
-            launcher_win      = "$launcherDir\master-3.bat"
-            launcher_ps1      = "$launcherDir\master-3.ps1"
-            command_fresh     = "claude --model sonnet --dangerously-skip-permissions '/scan-codebase-allocator'"
-            command_continue  = "claude --continue --model sonnet --dangerously-skip-permissions"
+            id                    = "master-3"
+            group                 = "masters"
+            role                  = "Allocator (Sonnet)"
+            model                 = "sonnet"
+            cwd                   = $projectPath
+            launcher_win          = "$launcherDir\master-3.bat"
+            launcher_win_continue = "$launcherDir\master-3-continue.bat"
+            launcher_ps1          = "$launcherDir\master-3.ps1"
+            launcher_ps1_continue = "$launcherDir\master-3-continue.ps1"
+            command_fresh         = "claude --model sonnet --dangerously-skip-permissions '/scan-codebase-allocator'"
+            command_continue      = "claude --continue --model sonnet --dangerously-skip-permissions"
         }
     ) + $workerEntries
 }
