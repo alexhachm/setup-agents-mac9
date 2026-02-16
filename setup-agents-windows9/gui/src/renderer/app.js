@@ -417,11 +417,12 @@ async function handleSetup() {
     elements.connectionError.textContent = '';
 
     try {
+        // Don't pass sessionMode — setup creates files/worktrees/manifest
+        // but skips terminal launches. The GUI's Launch tab handles launching.
         const result = await window.electron.runSetup({
             repoUrl: repoUrl || undefined,
             projectPath,
-            workers,
-            sessionMode: sessionMode === 'continue' ? '2' : '1'
+            workers
         });
 
         if (result.success) {
@@ -1463,13 +1464,21 @@ async function launchAgentGroup(group) {
     const mergeTabs = document.getElementById('launch-merge-tabs')?.checked;
     debugLog('LAUNCH', `Launching group: ${group}`, { continueMode, mergeTabs });
 
-    const result = await window.electron.launchGroup({ group, continueMode });
+    // Windows: use tabbed launch (single window per group)
+    const isWindows = navigator.platform === 'Win32' || navigator.userAgent.includes('Windows');
+    let result;
+    if (isWindows) {
+        result = await window.electron.launchGroupTabbed({ group, continueMode });
+    } else {
+        result = await window.electron.launchGroup({ group, continueMode });
+    }
+
     if (result.success) {
-        result.launched.forEach(r => launchedAgentIds.add(r.agentId));
+        (result.launched || []).forEach(r => launchedAgentIds.add(r.agentId));
         updateLaunchStatuses();
 
         // Merge into tabs if requested (macOS)
-        if (mergeTabs) {
+        if (!isWindows && mergeTabs) {
             setTimeout(async () => {
                 await window.electron.mergeTerminalWindows();
             }, 3000);
@@ -1481,8 +1490,23 @@ async function launchAgentGroup(group) {
 
 async function launchEverything() {
     debugLog('LAUNCH', 'Launching everything');
+
+    // Windows: launch all agents in a single window with tabs
+    const isWindows = navigator.platform === 'Win32' || navigator.userAgent.includes('Windows');
+    if (isWindows) {
+        const continueMode = document.querySelector('input[name="launch-mode"]:checked')?.value === 'continue';
+        const result = await window.electron.launchAllTabbed({ continueMode });
+        if (result.success) {
+            (result.launched || []).forEach(r => launchedAgentIds.add(r.agentId));
+            updateLaunchStatuses();
+        } else {
+            alert(`Failed to launch: ${result.error}`);
+        }
+        return;
+    }
+
+    // macOS/Linux: launch groups sequentially
     await launchAgentGroup('masters');
-    // Wait for masters to start before workers
     setTimeout(() => launchAgentGroup('workers'), 4000);
 }
 

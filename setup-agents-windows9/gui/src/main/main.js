@@ -39,8 +39,10 @@ function debug(category, message, data = null) {
     const logStr = `[MAIN:${category}] ${message}${data ? ' | ' + JSON.stringify(data).slice(0, 200) : ''}`;
     console.log(logStr);
 
-    // Send to renderer if window exists
-    mainWindow?.webContents.send('debug-log', entry);
+    // Send to renderer if window exists and is not destroyed
+    if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('debug-log', entry);
+    }
 }
 
 // Get project path from command line or default to parent
@@ -391,6 +393,14 @@ ipcMain.handle('get-signals', async () => {
 const { exec, spawn } = require('child_process');
 const os = require('os');
 
+// Clean environment for child processes — remove CLAUDECODE to prevent
+// "Cannot be launched inside another Claude Code session" errors
+function cleanEnv() {
+    const env = { ...process.env };
+    delete env.CLAUDECODE;
+    return env;
+}
+
 // Track launched processes per project
 const launchedProcesses = new Map(); // key: "projectPath:agentId"
 
@@ -463,7 +473,7 @@ ipcMain.handle('launch-agent', async (event, { agentId, projectPath: pp, continu
                 + `xterm -e bash -c '${linuxCmd}; exec bash'`;
         }
 
-        exec(terminalCmd, (error) => {
+        exec(terminalCmd, { env: cleanEnv() }, (error) => {
             if (error) {
                 debug('LAUNCH', `Error launching ${agentId}`, { error: error.message });
             }
@@ -534,7 +544,7 @@ ipcMain.handle('launch-group', async (event, { group, projectPath: pp, continueM
                 + `xterm -e bash -c '${linuxCmd}; exec bash'`;
         }
 
-        exec(terminalCmd, (error) => {
+        exec(terminalCmd, { env: cleanEnv() }, (error) => {
             if (error) debug('LAUNCH', `Error launching ${agent.id}`, { error: error.message });
         });
 
@@ -596,8 +606,65 @@ ipcMain.handle('launch-group-tabbed-wt', async (event, { group, projectPath: pp,
     }).join(' ');
 
     try {
-        exec(`wt ${tabArgs}`);
-        return { success: true, launched: agents.map(a => a.id) };
+        exec(`wt ${tabArgs}`, { env: cleanEnv() });
+        agents.forEach(a => {
+            launchedProcesses.set(`${pp}:${a.id}`, {
+                agentId: a.id,
+                projectPath: pp,
+                launchedAt: new Date().toISOString(),
+                continueMode
+            });
+        });
+        return { success: true, launched: agents.map(a => ({ agentId: a.id })) };
+    } catch (e) {
+        return { success: false, error: e.message };
+    }
+});
+
+// Windows: launch ALL agents (masters + workers) in a single window with tabs
+ipcMain.handle('launch-all-tabbed-wt', async (event, { projectPath: pp, continueMode }) => {
+    if (process.platform !== 'win32') return { success: false, error: 'Windows only' };
+    pp = pp || projectPath;
+
+    const manifestPath = path.join(pp, '.claude', 'launchers', 'manifest.json');
+    let manifest;
+    try {
+        manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+    } catch (e) {
+        return { success: false, error: 'Launcher manifest not found' };
+    }
+
+    const agents = manifest.agents;
+    if (agents.length === 0) return { success: false, error: 'No agents in manifest' };
+
+    const launcherDir = path.join(pp, '.claude', 'launchers');
+    const suffix = continueMode ? '-continue' : '';
+
+    // Build a single wt command: all agents as tabs in one window
+    const tabArgs = agents.map((agent, i) => {
+        const ps1File = path.join(launcherDir, `${agent.id}${suffix}.ps1`);
+        const prefix = i === 0 ? '' : '; new-tab';
+
+        if (fs.existsSync(ps1File)) {
+            return `${prefix} -d "${agent.cwd}" --title ${agent.id} powershell.exe -ExecutionPolicy Bypass -File "${ps1File}"`;
+        } else {
+            const cmd = continueMode ? agent.command_continue : agent.command_fresh;
+            const winCmd = cmd.replace(/'/g, '"');
+            return `${prefix} -d "${agent.cwd}" --title ${agent.id} cmd /k "${winCmd}"`;
+        }
+    }).join(' ');
+
+    try {
+        exec(`wt ${tabArgs}`, { env: cleanEnv() });
+        agents.forEach(a => {
+            launchedProcesses.set(`${pp}:${a.id}`, {
+                agentId: a.id,
+                projectPath: pp,
+                launchedAt: new Date().toISOString(),
+                continueMode
+            });
+        });
+        return { success: true, launched: agents.map(a => ({ agentId: a.id })) };
     } catch (e) {
         return { success: false, error: e.message };
     }

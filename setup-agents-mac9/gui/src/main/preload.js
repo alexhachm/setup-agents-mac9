@@ -38,6 +38,7 @@ contextBridge.exposeInMainWorld('electron', {
     launchAgent: (opts) => ipcRenderer.invoke('launch-agent', opts),
     launchGroup: (opts) => ipcRenderer.invoke('launch-group', opts),
     launchGroupTabbed: (opts) => ipcRenderer.invoke('launch-group-tabbed-wt', opts),
+    launchAllTabbed: (opts) => ipcRenderer.invoke('launch-all-tabbed-wt', opts),
     mergeTerminalWindows: () => ipcRenderer.invoke('merge-terminal-windows'),
     getLaunchedAgents: () => ipcRenderer.invoke('get-launched-agents'),
 

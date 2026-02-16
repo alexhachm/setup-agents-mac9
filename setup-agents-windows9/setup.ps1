@@ -368,6 +368,8 @@ Step "Creating hooks..."
 $hooksDir = Join-Path $projectPath ".claude\hooks"
 Copy-Item (Join-Path $ScriptDir "scripts\hooks\pre-tool-secret-guard.sh") (Join-Path $hooksDir "pre-tool-secret-guard.sh") -Force
 Copy-Item (Join-Path $ScriptDir "scripts\hooks\stop-notify.sh") (Join-Path $hooksDir "stop-notify.sh") -Force
+Copy-Item (Join-Path $ScriptDir "scripts\hooks\pre-tool-secret-guard.ps1") (Join-Path $hooksDir "pre-tool-secret-guard.ps1") -Force
+Copy-Item (Join-Path $ScriptDir "scripts\hooks\stop-notify.ps1") (Join-Path $hooksDir "stop-notify.ps1") -Force
 Copy-Item (Join-Path $ScriptDir "scripts\state-lock.sh") (Join-Path $projectScriptsDir "state-lock.sh") -Force
 
 Ok "Hooks created"

@@ -9,11 +9,11 @@
   "hooks": {
     "PreToolUse": [{
       "matcher": "Edit|Write|MultiEdit|Read",
-      "hooks": [{"type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/pre-tool-secret-guard.sh\""}]
+      "hooks": [{"type": "command", "command": "powershell.exe -ExecutionPolicy Bypass -File \"$CLAUDE_PROJECT_DIR/.claude/hooks/pre-tool-secret-guard.ps1\""}]
     }],
     "Stop": [{
       "matcher": "",
-      "hooks": [{"type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/stop-notify.sh\""}]
+      "hooks": [{"type": "command", "command": "powershell.exe -ExecutionPolicy Bypass -File \"$CLAUDE_PROJECT_DIR/.claude/hooks/stop-notify.ps1\""}]
     }]
   }
 }
