@@ -23,11 +23,17 @@ worktree_path=".worktrees/wt-$next_num"
 git branch -D "$branch_name" 2>/dev/null || true
 git worktree add "$worktree_path" -b "$branch_name"
 
-# Symlink shared state into the new worktree (relative for portability)
+# Link shared state into the new worktree (junction on Windows, symlink elsewhere)
 shared_state_dir="$PROJECT_DIR/.claude-shared-state"
 if [ -d "$shared_state_dir" ]; then
     rm -rf "$worktree_path/.claude/state"
-    ln -sf "../../../.claude-shared-state" "$worktree_path/.claude/state"
+    if [[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin* ]]; then
+        win_link=$(cygpath -w "$worktree_path/.claude/state")
+        win_target=$(cygpath -w "$shared_state_dir")
+        cmd //c "mklink /J \"$win_link\" \"$win_target\"" > /dev/null 2>&1
+    else
+        ln -sf "../../../.claude-shared-state" "$worktree_path/.claude/state"
+    fi
 fi
 
 # Update config file worker count (key=value format)

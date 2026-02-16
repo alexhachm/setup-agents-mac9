@@ -42,6 +42,22 @@ ok()    { echo -e "   ${GREEN}OK:${NC} $1"; }
 skip()  { echo -e "   ${YELLOW}SKIP:${NC} $1"; }
 fail()  { echo -e "   ${RED}FAIL:${NC} $1"; }
 
+# Cross-platform directory link: uses NTFS junctions on Windows, symlinks elsewhere
+# Usage: link_dir <link-path> <target-path>
+link_dir() {
+    local link_path="$1" target_path="$2"
+    rm -rf "$link_path"
+    if [[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin* ]]; then
+        # Windows: convert to native paths and create NTFS junction
+        local win_link win_target
+        win_link=$(cygpath -w "$link_path" 2>/dev/null || echo "$link_path" | sed 's|/|\\|g')
+        win_target=$(cd "$target_path" 2>/dev/null && cygpath -w "$(pwd)" 2>/dev/null || cygpath -w "$target_path" 2>/dev/null || echo "$target_path" | sed 's|/|\\|g')
+        cmd //c "mklink /J \"$win_link\" \"$win_target\"" > /dev/null 2>&1
+    else
+        ln -sf "$target_path" "$link_path"
+    fi
+}
+
 MAX_WORKERS=8
 
 # ============================================================================
@@ -399,8 +415,8 @@ for f in handoff.json codebase-map.json worker-status.json fix-queue.json clarif
     fi
 done
 
-rm -rf .claude/state
-ln -sf "../.claude-shared-state" .claude/state
+# Link .claude/state → .claude-shared-state (junction on Windows, symlink elsewhere)
+link_dir .claude/state "$project_path/.claude-shared-state"
 
 if ! grep -qF '.claude-shared-state/' .gitignore 2>/dev/null; then
     echo '.claude-shared-state/' >> .gitignore
@@ -428,20 +444,16 @@ rm -rf .worktrees 2>/dev/null || true
 mkdir -p .worktrees
 for i in $(seq 1 $worker_count); do
     git worktree add ".worktrees/wt-$i" -b "agent-$i"
-    rm -rf ".worktrees/wt-$i/.claude/state"
-    ln -sf "../../../.claude-shared-state" ".worktrees/wt-$i/.claude/state"
-    
+    link_dir ".worktrees/wt-$i/.claude/state" "$project_path/.claude-shared-state"
+
     mkdir -p ".worktrees/wt-$i/.claude/logs"
-    rm -rf ".worktrees/wt-$i/.claude/logs"
-    ln -sf "../../../.claude/logs" ".worktrees/wt-$i/.claude/logs"
-    
-    # Symlink knowledge directory so workers read shared knowledge
-    rm -rf ".worktrees/wt-$i/.claude/knowledge"
-    ln -sf "../../../.claude/knowledge" ".worktrees/wt-$i/.claude/knowledge"
-    
-    # Symlink signals directory
-    rm -rf ".worktrees/wt-$i/.claude/signals"
-    ln -sf "../../../.claude/signals" ".worktrees/wt-$i/.claude/signals"
+    link_dir ".worktrees/wt-$i/.claude/logs" "$project_path/.claude/logs"
+
+    # Shared knowledge directory so workers read shared knowledge
+    link_dir ".worktrees/wt-$i/.claude/knowledge" "$project_path/.claude/knowledge"
+
+    # Shared signals directory
+    link_dir ".worktrees/wt-$i/.claude/signals" "$project_path/.claude/signals"
     
     cp "$SCRIPT_DIR/templates/worker-claude.md" ".worktrees/wt-$i/CLAUDE.md"
 done
