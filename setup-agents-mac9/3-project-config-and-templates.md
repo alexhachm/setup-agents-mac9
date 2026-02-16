@@ -430,12 +430,12 @@ allowed-tools: [Bash, Read, Grep, Glob]
   },
   "hooks": {
     "PreToolUse": [{
-      "matcher": "Edit|Write|MultiEdit|Read",
-      "hooks": [{"type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/pre-tool-secret-guard.sh\""}]
+      "matcher": "Edit|Write|MultiEdit|Read|Bash",
+      "hooks": [{"type": "command", "command": "bash -c 'bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/pre-tool-secret-guard.sh\"'"}]
     }],
     "Stop": [{
       "matcher": "",
-      "hooks": [{"type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/stop-notify.sh\""}]
+      "hooks": [{"type": "command", "command": "bash -c 'bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/stop-notify.sh\"'"}]
     }]
   }
 }

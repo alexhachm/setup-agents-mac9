@@ -1572,12 +1572,13 @@ function renderProjectLaunchCommands() {
     if (!section || !grid) return;
 
     const cmds = state.launchCommands;
+    section.classList.remove('hidden');
+
     if (!cmds || cmds.length === 0) {
-        section.classList.add('hidden');
+        grid.innerHTML = '<div class="launch-project-empty">No launch commands detected yet. Master-2 will populate these after scanning the codebase.</div>';
+        if (sourceLabel) sourceLabel.textContent = '';
         return;
     }
-
-    section.classList.remove('hidden');
 
     // Show source files
     const sources = [...new Set(cmds.map(c => c.source).filter(Boolean))];

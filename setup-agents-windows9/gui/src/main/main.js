@@ -6,6 +6,8 @@ const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const chokidar = require('chokidar');
+const os = require('os');
+const { exec, spawn } = require('child_process');
 
 let mainWindow = null;
 let stateWatcher = null;
@@ -37,7 +39,7 @@ function debug(category, message, data = null) {
     }
 
     const logStr = `[MAIN:${category}] ${message}${data ? ' | ' + JSON.stringify(data).slice(0, 200) : ''}`;
-    console.log(logStr);
+    try { console.log(logStr); } catch (e) { /* ignore EPIPE */ }
 
     // Send to renderer if window exists and is not destroyed
     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -45,16 +47,39 @@ function debug(category, message, data = null) {
     }
 }
 
-// Get project path from command line or default to parent
+// Get project path from command line, env var, or recent config
 const args = process.argv.slice(2);
 debug('INIT', 'Starting with args', args);
+debug('INIT', 'PROJECT_PATH env', { env: process.env.PROJECT_PATH || 'not set' });
 
 const projectArg = args.find(a => !a.startsWith('-'));
 if (projectArg && fs.existsSync(path.join(projectArg, '.claude-shared-state'))) {
     projectPath = projectArg;
     debug('INIT', 'Project path from args', { projectPath });
+} else if (process.env.PROJECT_PATH && fs.existsSync(path.join(process.env.PROJECT_PATH, '.claude-shared-state'))) {
+    projectPath = process.env.PROJECT_PATH;
+    debug('INIT', 'Project path from PROJECT_PATH env', { projectPath });
 } else {
-    debug('INIT', 'No valid project path in args');
+    // Auto-detect from recent config
+    const configFile = path.join(os.homedir(), '.claude-multi-agent-config');
+    try {
+        if (fs.existsSync(configFile)) {
+            const content = fs.readFileSync(configFile, 'utf-8');
+            const match = content.match(/project_path\s*=\s*(.+)/);
+            if (match) {
+                const configPath = match[1].trim();
+                if (fs.existsSync(path.join(configPath, '.claude-shared-state'))) {
+                    projectPath = configPath;
+                    debug('INIT', 'Project path from config file', { projectPath });
+                }
+            }
+        }
+    } catch (e) {
+        debug('INIT', 'Error reading config', { error: e.message });
+    }
+    if (!projectPath) {
+        debug('INIT', 'No valid project path found');
+    }
 }
 
 const getStatePath = (file) => projectPath ? path.join(projectPath, '.claude-shared-state', file) : null;
@@ -390,15 +415,20 @@ ipcMain.handle('get-signals', async () => {
 
 // === Launcher & Multi-Project IPC Handlers ===
 
-const { exec, spawn } = require('child_process');
-const os = require('os');
-
 // Clean environment for child processes — remove CLAUDECODE to prevent
 // "Cannot be launched inside another Claude Code session" errors
 function cleanEnv() {
     const env = { ...process.env };
     delete env.CLAUDECODE;
     return env;
+}
+
+// Read and parse the launcher manifest, handling Windows backslash paths
+function readManifest(manifestPath) {
+    let raw = fs.readFileSync(manifestPath, 'utf-8');
+    // Fix Windows paths with unescaped backslashes in JSON
+    raw = raw.replace(/\\/g, '/');
+    return JSON.parse(raw);
 }
 
 // Track launched processes per project
@@ -409,12 +439,19 @@ let projects = new Map(); // path -> { name, path, addedAt }
 
 ipcMain.handle('get-launcher-manifest', async (event, forProjectPath) => {
     const pp = forProjectPath || projectPath;
-    if (!pp) return null;
+    debug('IPC', 'get-launcher-manifest called', { forProjectPath, projectPath, pp });
+    if (!pp) {
+        debug('IPC', 'No project path for manifest lookup');
+        return null;
+    }
     const manifestPath = path.join(pp, '.claude', 'launchers', 'manifest.json');
+    debug('IPC', 'Looking for manifest at', { manifestPath, exists: fs.existsSync(manifestPath) });
     try {
-        return JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+        const data = readManifest(manifestPath);
+        debug('IPC', 'Manifest loaded successfully', { agents: data.agents?.length });
+        return data;
     } catch (e) {
-        debug('IPC', 'No launcher manifest found', { path: manifestPath });
+        debug('IPC', 'Failed to read manifest', { path: manifestPath, error: e.message });
         return null;
     }
 });
@@ -426,7 +463,7 @@ ipcMain.handle('launch-agent', async (event, { agentId, projectPath: pp, continu
     const manifestPath = path.join(pp, '.claude', 'launchers', 'manifest.json');
     let manifest;
     try {
-        manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+        manifest = readManifest(manifestPath);
     } catch (e) {
         return { success: false, error: 'Launcher manifest not found. Run setup.sh first.' };
     }
@@ -452,13 +489,17 @@ ipcMain.handle('launch-agent', async (event, { agentId, projectPath: pp, continu
                 + `-e 'end tell'`;
 
         } else if (process.platform === 'win32') {
-            // Windows: prefer .ps1 launchers, fall back to .bat
-            const ps1File = agent.launcher_ps1 ? path.join(pp, agent.launcher_ps1) : null;
-            const batFile = agent.launcher_win ? path.join(pp, agent.launcher_win) : null;
+            // Windows: prefer .ps1 launchers, fall back to .bat, then raw command
+            const launcherDir = path.join(pp, '.claude', 'launchers');
+            const suffix = continueMode ? '-continue' : '';
+            const ps1File = agent.launcher_ps1 ? path.join(pp, agent.launcher_ps1)
+                : path.join(launcherDir, `${agent.id}${suffix}.ps1`);
+            const batFile = agent.launcher_win ? path.join(pp, agent.launcher_win)
+                : path.join(launcherDir, `${agent.id}${suffix}.bat`);
 
-            if (ps1File && fs.existsSync(ps1File)) {
+            if (fs.existsSync(ps1File)) {
                 terminalCmd = `where wt >nul 2>nul && wt new-tab -d "${cwd}" --title ${agent.id} powershell.exe -ExecutionPolicy Bypass -File "${ps1File}" || start powershell.exe -ExecutionPolicy Bypass -File "${ps1File}"`;
-            } else if (batFile && fs.existsSync(batFile)) {
+            } else if (fs.existsSync(batFile)) {
                 terminalCmd = `where wt >nul 2>nul && wt new-tab -d "${cwd}" --title ${agent.id} cmd /k "${batFile}" || start cmd /k "${batFile}"`;
             } else {
                 const winCmd = command.replace(/'/g, '"');
@@ -502,7 +543,7 @@ ipcMain.handle('launch-group', async (event, { group, projectPath: pp, continueM
     const manifestPath = path.join(pp, '.claude', 'launchers', 'manifest.json');
     let manifest;
     try {
-        manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+        manifest = readManifest(manifestPath);
     } catch (e) {
         return { success: false, error: 'Launcher manifest not found' };
     }
@@ -527,12 +568,16 @@ ipcMain.handle('launch-group', async (event, { group, projectPath: pp, continueM
                 + `-e 'do script "${escapedCmd}"' `
                 + `-e 'end tell'`;
         } else if (process.platform === 'win32') {
-            const ps1File = agent.launcher_ps1 ? path.join(pp, agent.launcher_ps1) : null;
-            const contPs1 = continueMode && agent.launcher_ps1 ? path.join(pp, agent.launcher_ps1.replace('.ps1', '-continue.ps1')) : null;
-            const launcherFile = continueMode ? (contPs1 || ps1File) : ps1File;
+            const launcherDir = path.join(pp, '.claude', 'launchers');
+            const suffix = continueMode ? '-continue' : '';
+            const ps1File = agent.launcher_ps1 ? path.join(pp, agent.launcher_ps1)
+                : path.join(launcherDir, `${agent.id}${suffix}.ps1`);
+            const batFile = path.join(launcherDir, `${agent.id}${suffix}.bat`);
 
-            if (launcherFile && fs.existsSync(launcherFile)) {
-                terminalCmd = `where wt >nul 2>nul && wt new-tab -d "${cwd}" --title ${agent.id} powershell.exe -ExecutionPolicy Bypass -File "${launcherFile}" || start powershell.exe -ExecutionPolicy Bypass -File "${launcherFile}"`;
+            if (fs.existsSync(ps1File)) {
+                terminalCmd = `where wt >nul 2>nul && wt new-tab -d "${cwd}" --title ${agent.id} powershell.exe -ExecutionPolicy Bypass -File "${ps1File}" || start powershell.exe -ExecutionPolicy Bypass -File "${ps1File}"`;
+            } else if (fs.existsSync(batFile)) {
+                terminalCmd = `where wt >nul 2>nul && wt new-tab -d "${cwd}" --title ${agent.id} cmd /k "${batFile}" || start cmd /k "${batFile}"`;
             } else {
                 const winCmd = command.replace(/'/g, '"');
                 terminalCmd = `where wt >nul 2>nul && wt new-tab -d "${cwd}" --title ${agent.id} cmd /k "${winCmd}" || start cmd /k "cd /d ${cwd} && ${winCmd}"`;
@@ -581,7 +626,7 @@ ipcMain.handle('launch-group-tabbed-wt', async (event, { group, projectPath: pp,
     const manifestPath = path.join(pp, '.claude', 'launchers', 'manifest.json');
     let manifest;
     try {
-        manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+        manifest = readManifest(manifestPath);
     } catch (e) {
         return { success: false, error: 'Launcher manifest not found' };
     }
@@ -629,7 +674,7 @@ ipcMain.handle('launch-all-tabbed-wt', async (event, { projectPath: pp, continue
     const manifestPath = path.join(pp, '.claude', 'launchers', 'manifest.json');
     let manifest;
     try {
-        manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+        manifest = readManifest(manifestPath);
     } catch (e) {
         return { success: false, error: 'Launcher manifest not found' };
     }
@@ -640,7 +685,6 @@ ipcMain.handle('launch-all-tabbed-wt', async (event, { projectPath: pp, continue
     const launcherDir = path.join(pp, '.claude', 'launchers');
     const suffix = continueMode ? '-continue' : '';
 
-    // Build a single wt command: all agents as tabs in one window
     const tabArgs = agents.map((agent, i) => {
         const ps1File = path.join(launcherDir, `${agent.id}${suffix}.ps1`);
         const prefix = i === 0 ? '' : '; new-tab';
