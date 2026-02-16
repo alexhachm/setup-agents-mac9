@@ -25,7 +25,21 @@ if command -v fswatch &>/dev/null; then
 elif command -v inotifywait &>/dev/null; then
     # Linux: use inotifywait
     inotifywait -t "$TIMEOUT" -e modify,create "$SIGNAL_FILE" 2>/dev/null || true
-    
+
+elif command -v powershell.exe &>/dev/null; then
+    # Windows: use .NET FileSystemWatcher via PowerShell for instant notification
+    SIGNAL_DIR=$(dirname "$SIGNAL_FILE")
+    SIGNAL_NAME=$(basename "$SIGNAL_FILE")
+    TIMEOUT_MS=$((TIMEOUT * 1000))
+    powershell.exe -NoProfile -Command "
+        \$w = New-Object System.IO.FileSystemWatcher
+        \$w.Path = (Resolve-Path '$SIGNAL_DIR').Path
+        \$w.Filter = '$SIGNAL_NAME'
+        \$w.NotifyFilter = [System.IO.NotifyFilters]::LastWrite -bor [System.IO.NotifyFilters]::CreationTime -bor [System.IO.NotifyFilters]::FileName
+        \$r = \$w.WaitForChanged([System.IO.WatcherChangeTypes]::All, $TIMEOUT_MS)
+        \$w.Dispose()
+    " 2>/dev/null || true
+
 else
     # Fallback: poll with short sleep
     elapsed=0

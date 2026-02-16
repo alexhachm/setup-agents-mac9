@@ -57,6 +57,18 @@ elif command -v inotifywait &>/dev/null; then
     # Linux: use inotifywait — watch directory for the specific file
     inotifywait -t "$TIMEOUT" -e modify,create "$SIGNAL_DIR/$SIGNAL_NAME" 2>/dev/null || true
 
+elif command -v powershell.exe &>/dev/null; then
+    # Windows: use .NET FileSystemWatcher via PowerShell for instant notification
+    TIMEOUT_MS=$((TIMEOUT * 1000))
+    powershell.exe -NoProfile -Command "
+        \$w = New-Object System.IO.FileSystemWatcher
+        \$w.Path = (Resolve-Path '$SIGNAL_DIR').Path
+        \$w.Filter = '$SIGNAL_NAME'
+        \$w.NotifyFilter = [System.IO.NotifyFilters]::LastWrite -bor [System.IO.NotifyFilters]::CreationTime -bor [System.IO.NotifyFilters]::FileName
+        \$r = \$w.WaitForChanged([System.IO.WatcherChangeTypes]::All, $TIMEOUT_MS)
+        \$w.Dispose()
+    " 2>/dev/null || true
+
 else
     # Fallback: poll with 1s interval using fingerprint for precision
     elapsed=0
