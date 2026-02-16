@@ -41,6 +41,7 @@ contextBridge.exposeInMainWorld('electron', {
     launchAllTabbed: (opts) => ipcRenderer.invoke('launch-all-tabbed-wt', opts),
     mergeTerminalWindows: () => ipcRenderer.invoke('merge-terminal-windows'),
     getLaunchedAgents: () => ipcRenderer.invoke('get-launched-agents'),
+    launchProjectCommand: (opts) => ipcRenderer.invoke('launch-project-command', opts),
 
     // Multi-project APIs
     addProject: (path) => ipcRenderer.invoke('add-project', path),

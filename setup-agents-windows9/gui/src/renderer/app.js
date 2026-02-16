@@ -52,7 +52,8 @@ let state = {
     // v2 state
     activeTab: 'dashboard', agentHealth: null, knowledgeFiles: [],
     signalHistory: [], tierClassifications: {}, requestTimers: {},
-    selectedKnowledgeFile: null, healthPollInterval: null, signalAgeInterval: null
+    selectedKnowledgeFile: null, healthPollInterval: null, signalAgeInterval: null,
+    launchCommands: []
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -456,6 +457,7 @@ async function loadAllState() {
     state.clarifications = await window.electron.getState('clarification-queue.json') || { questions: [], responses: [] };
     state.fixQueue = await window.electron.getState('fix-queue.json');
     state.codebaseMap = await window.electron.getState('codebase-map.json');
+    state.launchCommands = state.codebaseMap?.launch_commands || [];
     const logLines = await window.electron.getActivityLog(100);
     state.activityLog = logLines.map(parseLogLine).filter(Boolean);
     checkMasterReadiness();
@@ -471,7 +473,12 @@ async function handleStateChanged(filename) {
         case 'handoff.json': state.handoff = await window.electron.getState(filename); break;
         case 'clarification-queue.json': state.clarifications = await window.electron.getState(filename) || { questions: [], responses: [] }; break;
         case 'fix-queue.json': state.fixQueue = await window.electron.getState(filename); break;
-        case 'codebase-map.json': state.codebaseMap = await window.electron.getState(filename); checkMasterReadiness(); break;
+        case 'codebase-map.json':
+            state.codebaseMap = await window.electron.getState(filename);
+            state.launchCommands = state.codebaseMap?.launch_commands || [];
+            checkMasterReadiness();
+            renderProjectLaunchCommands();
+            break;
         case 'agent-health.json':
             checkAgentHealthScanStatus();
             if (state.activeTab === 'health') loadAgentHealth();
@@ -1401,6 +1408,9 @@ async function loadLaunchPanel() {
 
         // Load projects
         await loadProjectList();
+
+        // Render project launch commands
+        renderProjectLaunchCommands();
     } catch (e) {
         debugLog('LAUNCH', 'Error loading launch panel', { error: e.message });
     }
@@ -1549,6 +1559,97 @@ async function switchToProject(projectPath) {
         alert(`Error switching project: ${result.error}`);
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PROJECT APP LAUNCH COMMANDS
+// ═══════════════════════════════════════════════════════════════════════════
+const CATEGORY_ICONS = { dev: '🔧', build: '📦', test: '🧪', run: '▶️', docker: '🐳', lint: '🔍' };
+
+function renderProjectLaunchCommands() {
+    const section = document.getElementById('launch-project-section');
+    const grid = document.getElementById('launch-project-grid');
+    const sourceLabel = document.getElementById('launch-project-source');
+    if (!section || !grid) return;
+
+    const cmds = state.launchCommands;
+    if (!cmds || cmds.length === 0) {
+        section.classList.add('hidden');
+        return;
+    }
+
+    section.classList.remove('hidden');
+
+    // Show source files
+    const sources = [...new Set(cmds.map(c => c.source).filter(Boolean))];
+    if (sourceLabel) {
+        sourceLabel.textContent = sources.length > 0 ? `Detected from ${sources.join(', ')}` : '';
+    }
+
+    grid.innerHTML = cmds.map((cmd, i) => {
+        const icon = CATEGORY_ICONS[cmd.category] || '▶️';
+        const catClass = cmd.category || 'run';
+        return `<div class="launch-project-card ${catClass}">
+            <div class="launch-project-card-header">
+                <span class="launch-project-icon">${icon}</span>
+                <span class="launch-project-name">${escapeHtml(cmd.name)}</span>
+                <span class="launch-project-category">${escapeHtml(cmd.category || 'run')}</span>
+            </div>
+            <div class="launch-project-command">${escapeHtml(cmd.command)}</div>
+            <button class="launch-project-btn" id="proj-launch-btn-${i}" onclick="launchProjectApp(${i})">▶ Launch</button>
+        </div>`;
+    }).join('');
+}
+
+window.launchProjectApp = async function (index) {
+    const cmd = state.launchCommands[index];
+    if (!cmd) return;
+
+    const btn = document.getElementById(`proj-launch-btn-${index}`);
+    if (btn) {
+        btn.disabled = true;
+        btn.textContent = '⏳ Launching...';
+        btn.classList.add('launching');
+    }
+
+    try {
+        const project = await window.electron.getProject();
+        const result = await window.electron.launchProjectCommand({
+            command: cmd.command,
+            cwd: project?.path || '',
+            name: cmd.name
+        });
+
+        if (result.success) {
+            if (btn) {
+                btn.textContent = '✓ Launched';
+                btn.classList.remove('launching');
+                btn.classList.add('launched');
+            }
+            debugLog('LAUNCH', `Project command launched: ${cmd.name}`, { command: cmd.command });
+        } else {
+            if (btn) {
+                btn.textContent = '✗ Failed';
+                btn.classList.remove('launching');
+            }
+            debugLog('LAUNCH', `Failed to launch: ${cmd.name}`, { error: result.error });
+        }
+    } catch (e) {
+        if (btn) {
+            btn.textContent = '✗ Error';
+            btn.classList.remove('launching');
+        }
+        debugLog('LAUNCH', `Error launching: ${cmd.name}`, { error: e.message });
+    }
+
+    // Reset button after 5s
+    setTimeout(() => {
+        if (btn) {
+            btn.disabled = false;
+            btn.textContent = '▶ Launch';
+            btn.className = 'launch-project-btn';
+        }
+    }, 5000);
+};
 
 // Initialize
 init();

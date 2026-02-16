@@ -82,6 +82,55 @@ cat package.json 2>/dev/null || cat pyproject.toml 2>/dev/null || cat Cargo.toml
 cat tsconfig.json 2>/dev/null | head -30 || true
 ```
 
+**2e. Detect launch commands (how to run the project):**
+```bash
+# Extract runnable commands from project config files
+# package.json scripts (most common)
+node -e "
+  try {
+    const pkg = require('./package.json');
+    const scripts = pkg.scripts || {};
+    const priority = ['dev','start','serve','build','test','lint','preview','storybook'];
+    const results = [];
+    for (const [name, cmd] of Object.entries(scripts)) {
+      const cat = name.match(/dev|serve|start|preview|storybook/) ? 'dev'
+        : name.match(/build|compile/) ? 'build'
+        : name.match(/test|spec|e2e|cypress/) ? 'test'
+        : name.match(/lint|format|check/) ? 'lint' : 'run';
+      results.push({name: name, command: 'npm run ' + name, source: 'package.json', category: cat});
+    }
+    console.log(JSON.stringify(results));
+  } catch(e) { console.log('[]'); }
+" 2>/dev/null || echo '[]'
+
+# Makefile targets
+if [ -f Makefile ]; then
+  grep -E '^[a-zA-Z_-]+:' Makefile | sed 's/:.*//' | head -10
+fi
+
+# docker-compose
+if [ -f docker-compose.yml ] || [ -f docker-compose.yaml ]; then
+  echo '{"name":"Docker Compose Up","command":"docker-compose up","source":"docker-compose.yml","category":"docker"}'
+fi
+
+# Python entry points
+ls manage.py app.py main.py run.py 2>/dev/null
+
+# Cargo.toml (Rust)
+if [ -f Cargo.toml ]; then
+  echo '{"name":"Cargo Run","command":"cargo run","source":"Cargo.toml","category":"run"}'
+  echo '{"name":"Cargo Test","command":"cargo test","source":"Cargo.toml","category":"test"}'
+fi
+
+# go.mod (Go)
+if [ -f go.mod ]; then
+  echo '{"name":"Go Run","command":"go run .","source":"go.mod","category":"run"}'
+  echo '{"name":"Go Test","command":"go test ./...","source":"go.mod","category":"test"}'
+fi
+```
+
+Save detected commands for Step 4 — you will include them in `codebase-map.json` as `"launch_commands"`.
+
 **After Pass 1, STOP and build a draft domain map.** You should now know:
 - The top-level directory structure → candidate domains
 - Which files are large/complex → where deep reads matter
@@ -154,6 +203,9 @@ bash .claude/scripts/state-lock.sh .claude/state/codebase-map.json 'cat > .claud
 {
   "scanned_at": "[ISO timestamp]",
   "scan_type": "full_2pass",
+  "launch_commands": [
+    { "name": "[friendly name]", "command": "[shell command]", "source": "[config file]", "category": "dev|build|test|run|docker|lint" }
+  ],
   "domains": {
     "[domain-name]": {
       "path": "[directory path]",
@@ -174,6 +226,16 @@ bash .claude/scripts/state-lock.sh .claude/state/codebase-map.json 'cat > .claud
   ]
 }
 MAP'
+```
+
+### Step 4b: Write launch commands to handoff.json
+
+If launch commands were detected, write them to `handoff.json` so Master-1 can inform the user:
+```bash
+# Only if launch_commands were detected
+if [ "$(jq '.launch_commands | length' .claude/state/codebase-map.json 2>/dev/null)" -gt 0 ]; then
+  bash .claude/scripts/state-lock.sh .claude/state/handoff.json 'jq ". + {launch_commands: $(jq '.launch_commands' .claude/state/codebase-map.json)}" .claude/state/handoff.json > /tmp/ho.json && mv /tmp/ho.json .claude/state/handoff.json'
+fi
 ```
 
 ### Step 5: Update codebase-insights.md

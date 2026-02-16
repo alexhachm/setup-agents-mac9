@@ -2727,3 +2727,147 @@ section h2 {
 .launch-merge-option input[type="checkbox"] {
     accent-color: var(--accent-blue);
 }
+
+/* === Project App Launch Commands === */
+.launch-project-section {
+    background: var(--bg-card);
+    border-radius: var(--border-radius);
+    border: 1px solid var(--border-color);
+    padding: 14px;
+    margin-top: 16px;
+}
+
+.launch-project-section.hidden {
+    display: none;
+}
+
+.launch-project-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 12px;
+}
+
+.launch-project-header h2 {
+    font-size: 14px;
+    margin: 0;
+    color: var(--accent-green);
+}
+
+.launch-project-source {
+    font-size: 10px;
+    color: var(--text-muted);
+    font-style: italic;
+}
+
+.launch-project-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 10px;
+}
+
+.launch-project-empty {
+    color: var(--text-muted);
+    font-size: 12px;
+    text-align: center;
+    padding: 20px;
+    grid-column: 1 / -1;
+}
+
+.launch-project-card {
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--border-radius);
+    padding: 12px;
+    border-left: 3px solid var(--accent-green);
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.launch-project-card:hover {
+    border-color: var(--accent-green);
+    box-shadow: 0 0 10px rgba(63, 185, 80, 0.15);
+}
+
+.launch-project-card.build { border-left-color: var(--accent-blue); }
+.launch-project-card.test { border-left-color: var(--accent-orange); }
+.launch-project-card.docker { border-left-color: var(--accent-purple); }
+.launch-project-card.lint { border-left-color: var(--text-muted); }
+
+.launch-project-card-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 6px;
+}
+
+.launch-project-icon {
+    font-size: 14px;
+}
+
+.launch-project-name {
+    font-size: 12px;
+    font-weight: 600;
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.launch-project-category {
+    font-size: 9px;
+    padding: 1px 6px;
+    background: var(--bg-primary);
+    border-radius: 8px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.launch-project-command {
+    font-family: 'SF Mono', Consolas, 'Courier New', monospace;
+    font-size: 10px;
+    color: var(--text-secondary);
+    padding: 4px 6px;
+    background: var(--bg-primary);
+    border-radius: 3px;
+    margin-bottom: 8px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.launch-project-btn {
+    width: 100%;
+    background: linear-gradient(135deg, #238636, #2ea043);
+    color: white;
+    border: none;
+    padding: 6px 0;
+    border-radius: 5px;
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity 0.2s, transform 0.1s;
+}
+
+.launch-project-btn:hover {
+    opacity: 0.9;
+    transform: translateY(-1px);
+}
+
+.launch-project-btn:active {
+    transform: translateY(0);
+}
+
+.launch-project-btn.launching {
+    background: var(--bg-tertiary);
+    color: var(--accent-orange);
+    border: 1px solid var(--accent-orange);
+    cursor: wait;
+}
+
+.launch-project-btn.launched {
+    background: var(--bg-tertiary);
+    color: var(--accent-green);
+    border: 1px solid var(--accent-green);
+    cursor: default;
+}

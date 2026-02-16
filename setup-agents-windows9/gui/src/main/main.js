@@ -670,6 +670,49 @@ ipcMain.handle('launch-all-tabbed-wt', async (event, { projectPath: pp, continue
     }
 });
 
+// Launch a project command (detected from codebase scan)
+ipcMain.handle('launch-project-command', async (event, { command, cwd, name }) => {
+    const pp = cwd || projectPath;
+    if (!pp) return { success: false, error: 'No project path' };
+
+    debug('LAUNCH', `Launching project command: ${name}`, { command, cwd: pp });
+
+    try {
+        let terminalCmd;
+
+        if (process.platform === 'darwin') {
+            const escapedCmd = `cd '${pp}' && ${command}`.replace(/'/g, "'\\''");
+            terminalCmd = `osascript -e 'tell application "Terminal"' `
+                + `-e 'activate' `
+                + `-e 'do script "${escapedCmd}"' `
+                + `-e 'end tell'`;
+
+        } else if (process.platform === 'win32') {
+            const winCmd = command.replace(/'/g, '"');
+            terminalCmd = `where wt >nul 2>nul && wt new-tab -d "${pp}" --title "${name || 'Project'}" cmd /k "${winCmd}" || start cmd /k "cd /d ${pp} && ${winCmd}"`;
+
+        } else {
+            const linuxCmd = `cd '${pp}' && ${command}`;
+            terminalCmd = `which gnome-terminal >/dev/null 2>&1 && gnome-terminal -- bash -c '${linuxCmd}; exec bash' || `
+                + `which konsole >/dev/null 2>&1 && konsole -e bash -c '${linuxCmd}; exec bash' || `
+                + `xterm -e bash -c '${linuxCmd}; exec bash'`;
+        }
+
+        exec(terminalCmd, { env: cleanEnv() }, (error) => {
+            if (error) {
+                debug('LAUNCH', `Error launching project command: ${name}`, { error: error.message });
+            }
+        });
+
+        debug('LAUNCH', `Project command launched: ${name}`);
+        return { success: true, name, command };
+
+    } catch (e) {
+        debug('LAUNCH', `Failed to launch project command: ${name}`, { error: e.message });
+        return { success: false, error: e.message };
+    }
+});
+
 ipcMain.handle('get-launched-agents', async () => {
     return Array.from(launchedProcesses.entries()).map(([key, val]) => ({
         key,
