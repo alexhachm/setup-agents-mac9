@@ -86,7 +86,8 @@ User says: "fix worker-1: the button still doesn't work"
 **Action:**
 1. Create fix task (URGENT priority)
 2. Add lesson to knowledge/mistakes.md
-3. Signal Master-3
+3. Append lesson to CLAUDE.md (high-visibility)
+4. Signal Master-3
 
 **Step 1 - Create fix task:**
 ```bash
@@ -119,7 +120,17 @@ bash .claude/scripts/state-lock.sh .claude/knowledge/mistakes.md 'cat >> .claude
 LESSON'
 ```
 
-**Step 3 - Also append to legacy worker-lessons.md for backward compat:**
+**Step 3 - Append lesson to CLAUDE.md (high-visibility for all agents):**
+```bash
+cat >> CLAUDE.md << 'LESSON'
+
+### [Date] - [Brief description]
+- **What went wrong:** [description from user]
+- **How to prevent:** [infer a rule from the mistake]
+LESSON
+```
+
+**Step 4 - Also append to legacy worker-lessons.md for backward compat:**
 ```bash
 bash .claude/scripts/state-lock.sh .claude/state/worker-lessons.md 'cat >> .claude/state/worker-lessons.md << WLESSON
 
@@ -130,7 +141,7 @@ bash .claude/scripts/state-lock.sh .claude/state/worker-lessons.md 'cat >> .clau
 WLESSON'
 ```
 
-Say: "Fix task created for Worker-N. Lesson recorded in knowledge system. Worker will pick this up as priority."
+Say: "Fix task created for Worker-N. Lesson recorded in knowledge system and CLAUDE.md. Worker will pick this up as priority."
 
 ### Type 3: Status Check
 User says: "status" / "what's happening" / "show workers"

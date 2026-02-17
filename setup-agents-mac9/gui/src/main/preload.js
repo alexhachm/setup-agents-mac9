@@ -54,6 +54,7 @@ contextBridge.exposeInMainWorld('electron', {
     getRecentProjects: () => ipcRenderer.invoke('get-recent-projects'),
     browseDirectory: () => ipcRenderer.invoke('browse-directory'),
     getSetupScriptDir: () => ipcRenderer.invoke('get-setup-script-dir'),
+    checkProjectSetup: (path) => ipcRenderer.invoke('check-project-setup', path),
     onSetupProgress: (callback) => ipcRenderer.on('setup-progress', (_, data) => callback(data)),
 });
 

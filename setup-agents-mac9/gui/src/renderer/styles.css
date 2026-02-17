@@ -167,6 +167,13 @@ body {
     overflow: hidden;
     text-overflow: ellipsis;
 }
+.recent-project-repo {
+    font-size: 10px;
+    color: var(--accent-blue);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
 
 .recent-project-actions {
     display: flex;
@@ -180,6 +187,36 @@ body {
     border-radius: 8px;
     background: rgba(63, 185, 80, 0.2);
     color: var(--accent-green);
+}
+
+.setup-needed-banner {
+    background: rgba(210, 153, 34, 0.15);
+    border: 1px solid var(--accent-orange);
+    border-radius: var(--border-radius);
+    padding: 10px 14px;
+    margin-bottom: 12px;
+    color: var(--accent-orange);
+    font-size: 12px;
+    line-height: 1.5;
+}
+.setup-needed-banner strong {
+    color: var(--text-primary);
+}
+.setup-missing-info {
+    text-align: center;
+    padding: 20px;
+}
+.setup-missing-info h3 {
+    margin-bottom: 8px;
+    color: var(--accent-orange);
+}
+.setup-missing-info p {
+    color: var(--text-secondary);
+    margin-bottom: 8px;
+    font-size: 12px;
+}
+.setup-missing-info .primary-btn {
+    margin-top: 10px;
 }
 
 .setup-separator {

@@ -304,7 +304,12 @@ step "Initializing state files..."
 
 echo '{}' > .claude/state/handoff.json
 echo '{}' > .claude/state/codebase-map.json
-echo '{}' > .claude/state/worker-status.json
+# Build initial worker-status with all workers idle (launched on demand)
+echo "{}" | jq --argjson n "$worker_count" '
+  [range(1; $n+1)] | reduce .[] as $i ({};
+    .["worker-\($i)"] = {"status":"idle","domain":null,"current_task":null,
+      "tasks_completed":0,"context_budget":0,"claimed_by":null,"last_heartbeat":null}
+  )' > .claude/state/worker-status.json
 echo '{}' > .claude/state/fix-queue.json
 echo '{"questions":[],"responses":[]}' > .claude/state/clarification-queue.json
 echo '{"tasks":[]}' > .claude/state/task-queue.json
@@ -376,7 +381,10 @@ chmod +x .claude/scripts/add-worker.sh
 cp "$SCRIPT_DIR/scripts/signal-wait.sh" .claude/scripts/signal-wait.sh
 chmod +x .claude/scripts/signal-wait.sh
 
-ok "Helper scripts created (including signal-wait.sh)"
+cp "$SCRIPT_DIR/scripts/launch-worker.sh" .claude/scripts/launch-worker.sh
+chmod +x .claude/scripts/launch-worker.sh
+
+ok "Helper scripts created (including signal-wait.sh, launch-worker.sh)"
 
 # ============================================================================
 # 11. HOOKS
@@ -695,7 +703,7 @@ echo "  Tier 1: Trivial → Master-2 executes directly (~2-5 min)"
 echo "  Tier 2: Single domain → Master-2 assigns to one worker (~5-15 min)"
 echo "  Tier 3: Multi-domain → Full decomposition pipeline (~20-60 min)"
 echo ""
-echo "TERMINALS NEEDED: $((worker_count + 3))"
+echo "TERMINALS AT STARTUP: 3 (masters only — workers launch on demand)"
 echo ""
 
 # In headless mode, launching depends on session-mode argument
@@ -734,9 +742,15 @@ if [[ "$launch" =~ ^[Yy]$ ]]; then
     else
         step "Resetting sessions (wiping ALL Claude Code state)..."
 
-        for f in handoff.json codebase-map.json worker-status.json fix-queue.json; do
+        for f in handoff.json codebase-map.json fix-queue.json; do
             echo '{}' > "$project_path/.claude-shared-state/$f" 2>/dev/null || true
         done
+        # Pre-populate worker-status with idle entries
+        echo "{}" | jq --argjson n "$worker_count" '
+          [range(1; $n+1)] | reduce .[] as $i ({};
+            .["worker-\($i)"] = {"status":"idle","domain":null,"current_task":null,
+              "tasks_completed":0,"context_budget":0,"claimed_by":null,"last_heartbeat":null}
+          )' > "$project_path/.claude-shared-state/worker-status.json" 2>/dev/null || true
         echo '{"questions":[],"responses":[]}' > "$project_path/.claude-shared-state/clarification-queue.json" 2>/dev/null || true
         echo '{"tasks":[]}' > "$project_path/.claude-shared-state/task-queue.json" 2>/dev/null || true
         cat > "$project_path/.claude-shared-state/agent-health.json" << 'HEALTH'
@@ -852,27 +866,8 @@ MERGE_SCRIPT
     osascript -e "tell application \"Terminal\" to set miniaturized of window id $MASTER_WIN_ID to true"
     sleep 1
 
-    step "  Creating worker windows..."
-
-    for i in $(seq 1 $worker_count); do
-        osascript -e "tell application \"Terminal\"
-            activate
-            do script \"$launcher_dir/worker-${i}${w_suffix}.sh\"
-        end tell"
-        sleep 2
-    done
-
-    ok "  $worker_count worker windows created"
-
-    if [ "$worker_count" -gt 1 ]; then
-        step "  Merging workers into tabs..."
-        merge_visible_windows
-        sleep 2
-    fi
-
-    WORKER_WIN_ID=$(osascript -e 'tell application "Terminal" to return id of front window')
-    WORKER_TAB_COUNT=$(osascript -e "tell application \"Terminal\" to return count of tabs of window id $WORKER_WIN_ID")
-    ok "  Workers merged: $WORKER_TAB_COUNT tabs in window $WORKER_WIN_ID"
+    # Workers are NOT launched at startup — they launch ON DEMAND when tasks are assigned
+    ok "  Workers will launch ON DEMAND when tasks are assigned ($worker_count worktrees ready)"
 
     step "  Restoring windows..."
     osascript -e "tell application \"Terminal\"
@@ -898,15 +893,16 @@ MERGE_SCRIPT
     echo "  Tab 2: MASTER-3 (Sonnet) — Allocator (scanning, then routing)"
     echo "  Tab 3: MASTER-1 (Sonnet) — Interface (talk here)"
     echo ""
-    echo "WORKERS WINDOW ($worker_count tabs):"
+    echo "WORKERS ($worker_count worktrees ready — launch ON DEMAND):"
     for i in $(seq 1 $worker_count); do
-        echo "  Tab $i: WORKER-$i (Opus)"
+        echo "  Worker-$i (Opus): .worktrees/wt-$i — launches when task assigned"
     done
     echo ""
     echo -e "${YELLOW}Tier 1 tasks (trivial): Master-2 executes directly (~2-5 min)${NC}"
-    echo -e "${YELLOW}Tier 2 tasks (single domain): Assigned to one worker via claim-lock (~5-15 min)${NC}"
+    echo -e "${YELLOW}Tier 2 tasks (single domain): Assigned to one worker (~5-15 min)${NC}"
     echo -e "${YELLOW}Tier 3 tasks (multi-domain): Full decomposition pipeline (~20-60 min)${NC}"
     echo ""
+    echo -e "${YELLOW}Workers launch ON DEMAND — no idle polling, no wasted API credits.${NC}"
     echo -e "${YELLOW}Knowledge persists across resets — system improves over time.${NC}"
     echo -e "${YELLOW}Just talk to MASTER-1 (Tab 3, Masters window)!${NC}"
     echo ""

@@ -296,12 +296,22 @@ async function renderProjectTabs() {
         tabsContainer.innerHTML = projects.map(p => {
             const name = p.name || p.path.split('/').pop();
             const isActive = name === currentProject || p.path.endsWith('/' + currentProject);
-            return `<div class="project-tab ${isActive ? 'active' : ''}" 
-                onclick="window.openExistingProject('${escapeHtml(p.path)}')" title="${escapeHtml(p.path)}">
+            return `<div class="project-tab ${isActive ? 'active' : ''}"
+                data-project-path="${escapeHtml(p.path)}" title="${escapeHtml(p.path)}">
                 <span>${escapeHtml(name)}</span>
-                <span class="tab-close" onclick="event.stopPropagation(); removeProjectTab('${escapeHtml(p.path)}')">✕</span>
+                <span class="tab-close">✕</span>
             </div>`;
         }).join('');
+
+        // Attach click handlers using data attributes
+        tabsContainer.querySelectorAll('.project-tab').forEach(tab => {
+            const pp = tab.dataset.projectPath;
+            tab.addEventListener('click', () => window.openExistingProject(pp));
+            tab.querySelector('.tab-close')?.addEventListener('click', (e) => {
+                e.stopPropagation();
+                removeProjectTab(pp);
+            });
+        });
     } catch (e) {
         debugLog('TABS', 'Error rendering project tabs', { error: e.message });
     }
@@ -336,17 +346,28 @@ async function loadRecentProjects() {
         }
 
         list.innerHTML = projects.map(p => `
-            <div class="recent-project-card" onclick="openExistingProject('${escapeHtml(p.path)}')">
+            <div class="recent-project-card" data-project-path="${escapeHtml(p.path)}">
                 <div class="recent-project-info">
                     <div class="recent-project-name">${escapeHtml(p.name)}</div>
                     <div class="recent-project-path">${escapeHtml(p.path)}</div>
+                    ${p.repoUrl ? `<div class="recent-project-repo">${escapeHtml(p.repoUrl)}</div>` : ''}
                 </div>
                 <div class="recent-project-actions">
                     ${p.hasManifest ? '<span class="recent-manifest-badge">✓ Ready</span>' : ''}
-                    <button class="secondary-btn" onclick="event.stopPropagation(); openExistingProject('${escapeHtml(p.path)}')">Open</button>
+                    <button class="secondary-btn open-project-btn">Open</button>
                 </div>
             </div>
         `).join('');
+
+        // Attach click handlers using data attributes (avoids backslash escaping issues)
+        list.querySelectorAll('.recent-project-card').forEach(card => {
+            const pp = card.dataset.projectPath;
+            card.addEventListener('click', () => openExistingProject(pp));
+            card.querySelector('.open-project-btn')?.addEventListener('click', (e) => {
+                e.stopPropagation();
+                openExistingProject(pp);
+            });
+        });
     } catch (e) {
         debugLog('SETUP', 'Error loading recent projects', { error: e.message });
     }
@@ -354,23 +375,43 @@ async function loadRecentProjects() {
 
 window.openExistingProject = async function (projectPathStr) {
     debugLog('SETUP', 'Opening existing project', { path: projectPathStr });
+    // Extract project name from path (handle both / and \ separators)
+    const projectName = projectPathStr.split(/[/\\]/).pop();
     try {
         // Switch to this project
         const result = await window.electron.switchProject(projectPathStr);
         if (result.success) {
-            state.projectName = projectPathStr.split('/').pop();
+            state.projectName = projectName;
             elements.projectName.textContent = state.projectName;
+
+            // Check if setup is needed
+            if (result.needsSetup) {
+                debugLog('SETUP', 'Project needs setup', { path: projectPathStr });
+                showSetupNeeded(projectPathStr, projectName);
+                return;
+            }
+
             showDashboard();
             await loadAllState();
             // Auto-switch to launch tab
             switchTab('launch');
         } else {
             // Try adding it first then switching
-            await window.electron.addProject(projectPathStr);
+            const addResult = await window.electron.addProject(projectPathStr);
+            if (addResult.success && addResult.needsSetup) {
+                state.projectName = projectName;
+                elements.projectName.textContent = state.projectName;
+                showSetupNeeded(projectPathStr, projectName);
+                return;
+            }
             const r2 = await window.electron.switchProject(projectPathStr);
             if (r2.success) {
-                state.projectName = projectPathStr.split('/').pop();
+                state.projectName = projectName;
                 elements.projectName.textContent = state.projectName;
+                if (r2.needsSetup) {
+                    showSetupNeeded(projectPathStr, projectName);
+                    return;
+                }
                 showDashboard();
                 await loadAllState();
                 switchTab('launch');
@@ -382,6 +423,52 @@ window.openExistingProject = async function (projectPathStr) {
         elements.connectionError.textContent = e.message;
     }
 };
+
+async function showSetupNeeded(projectPathStr, projectName) {
+    // Check what specifically is missing
+    const setupStatus = await window.electron.checkProjectSetup(projectPathStr);
+    const missingList = (setupStatus.missing || []).join(', ');
+
+    // Show setup screen pre-populated with this project
+    elements.dashboardScreen.classList.remove('active');
+    elements.connectionScreen.classList.add('active');
+
+    // Pre-fill the setup form
+    const pathInput = document.getElementById('setup-project-path');
+    const repoInput = document.getElementById('setup-repo-url');
+    if (pathInput) pathInput.value = projectPathStr;
+
+    // Try to detect repo URL from recent projects data
+    try {
+        const recentProjects = await window.electron.getRecentProjects();
+        const match = recentProjects.find(p => p.path === projectPathStr);
+        if (match?.repoUrl && repoInput) {
+            repoInput.value = match.repoUrl;
+        }
+    } catch (e) { /* ignore */ }
+
+    // Show a banner explaining what's needed
+    elements.connectionError.textContent = '';
+    const setupBanner = document.getElementById('setup-needed-banner');
+    if (setupBanner) {
+        setupBanner.classList.remove('hidden');
+        setupBanner.innerHTML = `<strong>${escapeHtml(projectName)}</strong> is missing orchestration files (${escapeHtml(missingList)}). Run setup to initialize.`;
+    } else {
+        // Create the banner if it doesn't exist
+        const banner = document.createElement('div');
+        banner.id = 'setup-needed-banner';
+        banner.className = 'setup-needed-banner';
+        banner.innerHTML = `<strong>${escapeHtml(projectName)}</strong> is missing orchestration files (${escapeHtml(missingList)}). Run setup to initialize.`;
+        const setupForm = document.getElementById('setup-form') || document.querySelector('.setup-section');
+        if (setupForm) {
+            setupForm.parentNode.insertBefore(banner, setupForm);
+        } else {
+            elements.connectionScreen.querySelector('.connection-content')?.prepend(banner);
+        }
+    }
+
+    debugLog('SETUP', 'Showing setup-needed screen', { projectName, missing: setupStatus.missing });
+}
 
 async function handleSetup() {
     const repoUrl = document.getElementById('setup-repo-url')?.value.trim() || '';
@@ -1388,7 +1475,30 @@ async function loadLaunchPanel() {
     try {
         launchManifest = await window.electron.getLauncherManifest();
         if (!launchManifest) {
-            document.getElementById('launch-no-manifest')?.classList.remove('hidden');
+            const noManifestEl = document.getElementById('launch-no-manifest');
+            if (noManifestEl) {
+                noManifestEl.classList.remove('hidden');
+                // Check what's missing and offer setup
+                const setupStatus = await window.electron.checkProjectSetup();
+                if (setupStatus.needsSetup) {
+                    const missingList = (setupStatus.missing || []).join(', ');
+                    noManifestEl.innerHTML = `
+                        <div class="setup-missing-info">
+                            <h3>Project Setup Required</h3>
+                            <p>Missing: ${escapeHtml(missingList)}</p>
+                            <p>Run setup to generate agent launchers and orchestration files.</p>
+                            <button class="primary-btn" id="launch-run-setup-btn">Run Setup Now</button>
+                        </div>`;
+                    document.getElementById('launch-run-setup-btn')?.addEventListener('click', () => {
+                        // Navigate to setup screen with project pre-filled
+                        elements.dashboardScreen.classList.remove('active');
+                        elements.connectionScreen.classList.add('active');
+                        const pathInput = document.getElementById('setup-project-path');
+                        if (pathInput) pathInput.value = setupStatus.path || '';
+                        loadRecentProjects();
+                    });
+                }
+            }
             document.getElementById('launch-agents-container')?.classList.add('hidden');
             return;
         }

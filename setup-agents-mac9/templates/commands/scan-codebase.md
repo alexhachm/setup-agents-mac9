@@ -37,7 +37,7 @@ git log --since="$last_scan" --name-only --pretty=format: | sort -u | grep -v '^
 ```
 Read ONLY changed files. Update affected map entries. Skip to Step 6.
 
-**If empty**, proceed to the full 3-pass scan below.
+**If empty**, proceed to the full 2-pass scan below.
 
 ---
 
@@ -67,7 +67,7 @@ find . -type f \( -name "*.ts" -o -name "*.tsx" -o -name "*.js" -o -name "*.jsx"
   | grep -vE 'node_modules|\.git/|vendor/|dist/|build/|__pycache__|\.next/|\.worktrees/' \
   | xargs wc -l 2>/dev/null | sort -rn | head -40
 ```
-The largest files are where complexity concentrates. Note them for Pass 3.
+The largest files are where complexity concentrates. Note them for Pass 2.
 
 **2c. Git coupling map (which files actually change together):**
 ```bash

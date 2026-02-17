@@ -36,6 +36,22 @@ if [ -d "$shared_state_dir" ]; then
     fi
 fi
 
+# Link logs directory so new worker can write to shared log
+mkdir -p "$worktree_path/.claude/logs"
+rm -rf "$worktree_path/.claude/logs"
+if [[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin* ]]; then
+    win_link=$(cygpath -w "$worktree_path/.claude/logs")
+    win_target=$(cygpath -w "$PROJECT_DIR/.claude/logs")
+    cmd //c "mklink /J \"$win_link\" \"$win_target\"" > /dev/null 2>&1
+else
+    ln -sf "../../../.claude/logs" "$worktree_path/.claude/logs"
+fi
+
+# Copy worker CLAUDE.md
+if [ -f "$PROJECT_DIR/.worktrees/wt-1/CLAUDE.md" ]; then
+    cp "$PROJECT_DIR/.worktrees/wt-1/CLAUDE.md" "$worktree_path/CLAUDE.md"
+fi
+
 # Update config file worker count (key=value format)
 config_file="$HOME/.claude-multi-agent-config"
 if [ -f "$config_file" ]; then
@@ -45,11 +61,5 @@ if [ -f "$config_file" ]; then
     rm -f "$config_file.bak" 2>/dev/null
 fi
 
-# Open a new tab in the front Terminal window (the workers window)
-# Step 1: Cmd+T keystroke (separate osascript)
-osascript -e 'tell application "System Events" to keystroke "t" using {command down}'
-sleep 2
-# Step 2: Run command in the new tab (separate osascript)
-osascript -e "tell application \"Terminal\" to do script \"clear && printf '\\n\\033[1;44m\\033[1;37m  ████  I AM WORKER-$next_num  ████  \\033[0m\\n\\n' && cd '$PROJECT_DIR/$worktree_path' && claude --model opus --dangerously-skip-permissions\" in front window"
-
-echo "Worker $next_num launched in slot $next_num"
+# Workers are launched on demand by Masters via launch-worker.sh
+echo "Worker $next_num worktree created in slot $next_num (launch on demand)"

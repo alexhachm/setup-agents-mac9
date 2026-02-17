@@ -1,11 +1,13 @@
 ################################################################################
 # HELPER SCRIPTS (v3)
-# Contains: signal-wait.sh, state-lock.sh, add-worker.sh,
+# Contains: signal-wait.sh, state-lock.sh, add-worker.sh, launch-worker.sh,
 #           pre-tool-secret-guard.sh, stop-notify.sh
 # These go into the scripts/ and scripts/hooks/ directories alongside setup.sh
 #
 # v3 changes vs v8:
 #   - Restored add-worker.sh from v7 (lost during v7→v8 modular split)
+#   - Added launch-worker.sh for on-demand worker terminal launching
+#   - Removed macOS auto-launch from add-worker.sh (workers launch on demand)
 #   - All other scripts unchanged from v8
 ################################################################################
 
@@ -216,14 +218,72 @@ if [ -f "$config_file" ]; then
     rm -f "$config_file.bak" 2>/dev/null
 fi
 
-# Open a new tab in the front Terminal window (macOS only)
-if [[ "$OSTYPE" == darwin* ]]; then
-    osascript -e 'tell application "System Events" to keystroke "t" using {command down}'
-    sleep 2
-    osascript -e "tell application \"Terminal\" to do script \"clear && printf '\\n\\033[1;44m\\033[1;37m  ████  I AM WORKER-$next_num  ████  \\033[0m\\n\\n' && cd '$PROJECT_DIR/$worktree_path' && claude --model opus --dangerously-skip-permissions '/worker-loop'\" in front window"
+# Workers are launched on demand by Masters via launch-worker.sh
+echo "Worker $next_num worktree created in slot $next_num (launch on demand)"
+
+
+# ==============================================================================
+# FILE: scripts/launch-worker.sh
+# ==============================================================================
+
+#!/usr/bin/env bash
+# Launch a worker terminal on demand (called by Master-3/Master-2)
+# Usage: launch-worker.sh <worker-number>
+# Returns immediately (non-blocking). The worker terminal runs /worker-loop.
+set -e
+
+WORKER_NUM="$1"
+if [ -z "$WORKER_NUM" ]; then
+    echo "Usage: launch-worker.sh <worker-number>" >&2
+    exit 1
 fi
 
-echo "Worker $next_num launched in slot $next_num"
+# Resolve project directory (script lives at .claude/scripts/)
+PROJECT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+WORKTREE="$PROJECT_DIR/.worktrees/wt-$WORKER_NUM"
+LAUNCHER="$PROJECT_DIR/.claude/launchers/worker-${WORKER_NUM}.sh"
+
+# Verify worktree exists
+if [ ! -d "$WORKTREE" ]; then
+    echo "ERROR: Worktree not found: $WORKTREE" >&2
+    exit 1
+fi
+
+# Verify launcher exists
+if [ ! -f "$LAUNCHER" ]; then
+    echo "ERROR: Launcher not found: $LAUNCHER" >&2
+    exit 1
+fi
+
+# Platform-specific terminal launch (non-blocking)
+if [[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin* ]]; then
+    # Windows: prefer Windows Terminal, fall back to start bash
+    if command -v wt.exe &>/dev/null; then
+        wt.exe new-tab --title "Worker-$WORKER_NUM" bash "$LAUNCHER" &
+    else
+        start bash "$LAUNCHER" &
+    fi
+elif [[ "$OSTYPE" == darwin* ]]; then
+    # macOS: open new Terminal window
+    osascript -e "tell application \"Terminal\"
+        activate
+        do script \"$LAUNCHER\"
+    end tell" &
+else
+    # Linux: try common terminal emulators
+    if command -v gnome-terminal &>/dev/null; then
+        gnome-terminal --title="Worker-$WORKER_NUM" -- bash "$LAUNCHER" &
+    elif command -v konsole &>/dev/null; then
+        konsole --new-tab -e bash "$LAUNCHER" &
+    elif command -v xterm &>/dev/null; then
+        xterm -title "Worker-$WORKER_NUM" -e bash "$LAUNCHER" &
+    else
+        echo "WARN: No supported terminal emulator found. Run manually: $LAUNCHER" >&2
+        exit 1
+    fi
+fi
+
+echo "[LAUNCH_WORKER] worker-$WORKER_NUM terminal opened"
 
 
 # ==============================================================================
@@ -231,18 +291,37 @@ echo "Worker $next_num launched in slot $next_num"
 # ==============================================================================
 
 #!/usr/bin/env bash
-set -euo pipefail
-input=$(cat)
+# Pre-tool hook: blocks access to sensitive files (.env, secrets, credentials, keys)
+# Reads JSON from stdin, checks file_path and command fields.
+# MUST never crash — a crashing hook blocks ALL tool usage.
+# Exit 0 = allow, Exit 2 = block.
 
-file_path=$(echo "$input" | jq -r '.tool_input.file_path // empty' 2>/dev/null || echo "")
+input=$(cat 2>/dev/null || true)
+
+# If no input or empty input, allow
+if [ -z "$input" ]; then
+    exit 0
+fi
+
+# Extract file_path using bash-native parsing (no jq dependency)
+file_path=""
+if echo "$input" | grep -q '"file_path"'; then
+    file_path=$(echo "$input" | grep -o '"file_path"\s*:\s*"[^"]*"' | head -1 | sed 's/.*: *"//;s/"$//')
+fi
+
 if [ -n "$file_path" ]; then
-    if echo "$file_path" | grep -qiE '\.env|secrets|credentials|\.pem$|\.key$|id_rsa|\.secret'; then
+    if echo "$file_path" | grep -qiE '\.env($|[^a-z])|secrets|credentials|\.pem$|\.key$|id_rsa|\.secret'; then
         echo "BLOCKED: $file_path is sensitive" >&2
         exit 2
     fi
 fi
 
-command_str=$(echo "$input" | jq -r '.tool_input.command // empty' 2>/dev/null || echo "")
+# Extract command using bash-native parsing
+command_str=""
+if echo "$input" | grep -q '"command"'; then
+    command_str=$(echo "$input" | grep -o '"command"\s*:\s*"[^"]*"' | head -1 | sed 's/.*: *"//;s/"$//')
+fi
+
 if [ -n "$command_str" ]; then
     if echo "$command_str" | grep -qiE '(cat|less|head|tail|more|cp|mv|scp)\s+.*\.(env|pem|key|secret)'; then
         echo "BLOCKED: command accesses sensitive file" >&2
@@ -258,4 +337,9 @@ exit 0
 # ==============================================================================
 
 #!/usr/bin/env bash
-osascript -e 'display notification "Done" with title "Claude" sound name "Glass"' 2>/dev/null || true
+# Stop notification: notifies user when Claude stops execution.
+# macOS: system notification. Other platforms: silent success.
+if [ "$(uname -s)" = "Darwin" ]; then
+    osascript -e 'display notification "Done" with title "Claude" sound name "Glass"' 2>/dev/null || true
+fi
+exit 0

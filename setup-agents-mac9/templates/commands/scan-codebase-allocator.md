@@ -1,5 +1,5 @@
 ---
-description: Master-3 loads routing knowledge from Master-2's scan, then starts the allocate loop. Does NOT rescan the filesystem.
+description: Master-3 loads routing knowledge from Master-2's scan, then starts the allocate loop. Falls back to independent scan if Master-2 is unavailable.
 ---
 
 You are **Master-3: Allocator** running on **Sonnet**.
@@ -9,6 +9,7 @@ You are **Master-3: Allocator** running on **Sonnet**.
 cat .claude/docs/master-3-role.md
 cat .claude/knowledge/allocation-learnings.md
 cat .claude/knowledge/codebase-insights.md
+cat .claude/knowledge/instruction-patches.md
 ```
 
 ## First Message
@@ -17,9 +18,9 @@ cat .claude/knowledge/codebase-insights.md
 Loading routing knowledge...
 ```
 
-## Load Routing Knowledge (DO NOT rescan the filesystem)
+## Load Routing Knowledge (prefer Master-2's scan, fallback to independent scan)
 
-Master-2 has already scanned the codebase and written the results. You do NOT duplicate that work. Your job is to **understand the domain map well enough to route tasks to the right workers**.
+Master-2 has usually already scanned the codebase and written the results. You do NOT duplicate that work unless Master-2 is unavailable. Your job is to **understand the domain map well enough to route tasks to the right workers**.
 
 ### Step 1: Read Master-2's codebase map
 ```bash
@@ -40,19 +41,42 @@ for i in $(seq 1 18); do
         break
     fi
     if [ "$i" -eq 18 ]; then
-        echo "WARN: Master-2 scan not complete after 3 min. Doing lightweight fallback scan."
+        echo "WARN: Master-2 scan not complete after 3 min. Running independent fallback scan."
     fi
 done
 ```
 
-**Fallback only (if Master-2 is down/stuck after 3 min):** Do a minimal structure-only scan — directory tree + package.json only. Do NOT read source files.
+**Independent fallback scan (if Master-2 is down/stuck after 3 min):**
+
+Unlike v8 which only did directory tree + package.json, this fallback performs a real structure + coupling scan so Master-3 can make informed routing decisions even without Master-2.
+
 ```bash
-find . -type f \( -name "*.ts" -o -name "*.js" -o -name "*.py" -o -name "*.go" \) \
-  | grep -vE 'node_modules|\.git/|vendor/|dist/|build/|__pycache__|\.next/|\.worktrees/' \
+# Step A: Directory structure (candidate domains)
+find . -type f \( -name "*.ts" -o -name "*.tsx" -o -name "*.js" -o -name "*.jsx" \
+  -o -name "*.py" -o -name "*.go" -o -name "*.rs" -o -name "*.java" \
+  -o -name "*.vue" -o -name "*.svelte" \) \
+  | grep -vE 'node_modules|\.git/|vendor/|dist/|build/|__pycache__|\.next/|\.worktrees/|\.claude/' \
   | sed 's|/[^/]*$||' | sort -u
+
+# Step B: File sizes (complexity indicators)
+find . -type f \( -name "*.ts" -o -name "*.tsx" -o -name "*.js" -o -name "*.jsx" \
+  -o -name "*.py" -o -name "*.go" -o -name "*.rs" -o -name "*.java" \) \
+  | grep -vE 'node_modules|\.git/|vendor/|dist/|build/|__pycache__|\.next/|\.worktrees/' \
+  | xargs wc -l 2>/dev/null | sort -rn | head -30
+
+# Step C: Git coupling map (critical for routing)
+git log --oneline --name-only -50 | grep -v '^[a-f0-9]' | sort | uniq -c | sort -rn | head -20
+
+# Step D: Project config
 cat package.json 2>/dev/null || cat pyproject.toml 2>/dev/null || true
+
+# Step E: Key entry points (signatures only — same budget as Master-2 Pass 2)
+find . -type f \( -name "index.ts" -o -name "index.js" -o -name "main.ts" -o -name "main.js" \) \
+  | grep -vE 'node_modules|dist/|\.worktrees/' | head -10
+# For each: grep -n "^export\|^import.*from\|^class \|^function " <file> | head -20
 ```
-Write a minimal codebase-map.json with directory-level domains only. Master-2 will overwrite with a proper map when it catches up.
+
+Write a codebase-map.json from this data with directory-level domains, coupling info, and complexity ratings. Master-2 will overwrite with a more detailed map when it catches up — but this gives you enough for routing immediately.
 
 ### Step 2: Read codebase insights
 ```bash
@@ -85,7 +109,7 @@ echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [master-3] [SCAN_COMPLETE] domains=[D] ro
 
 Report:
 ```
-Routing knowledge loaded from Master-2's scan.
+Routing knowledge loaded [from Master-2's scan | from independent fallback scan].
   [D] domains mapped, [H] coupling hotspots noted.
   Allocation learnings from previous sessions: [loaded/empty].
 Starting allocation loop.
