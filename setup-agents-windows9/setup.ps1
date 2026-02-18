@@ -33,6 +33,30 @@ function Ok($msg)    { Write-Host "   OK: $msg" -ForegroundColor Green }
 function Skip($msg)  { Write-Host "   SKIP: $msg" -ForegroundColor Yellow }
 function Fail($msg)  { Write-Host "   FAIL: $msg" -ForegroundColor Red }
 
+function Escape-BashSingleQuoted([string]$Value) {
+    if ($null -eq $Value) { return "" }
+    return $Value -replace "'", "'\"'\"'"
+}
+
+function Convert-ToWslPath([string]$WindowsPath) {
+    if ([string]::IsNullOrWhiteSpace($WindowsPath)) { return "" }
+    $resolved = $WindowsPath
+    try {
+        $resolved = (Resolve-Path -LiteralPath $WindowsPath -ErrorAction Stop).Path
+    } catch {
+        try {
+            $resolved = [System.IO.Path]::GetFullPath($WindowsPath)
+        } catch {
+            $resolved = $WindowsPath
+        }
+    }
+    $normalized = $resolved -replace '\\', '/'
+    if ($normalized -match '^([A-Za-z]):/(.*)$') {
+        return "/mnt/$($matches[1].ToLower())/$($matches[2])"
+    }
+    return $normalized
+}
+
 $MAX_WORKERS = 8
 
 # ============================================================================
@@ -80,7 +104,7 @@ if (-not (Test-Path $templatesDir) -or -not (Test-Path $scriptsDir)) {
 }
 
 $missing = @()
-foreach ($tool in @("git", "node", "npm", "gh", "claude")) {
+foreach ($tool in @("git", "node", "npm")) {
     if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
         $missing += $tool
     }
@@ -90,12 +114,42 @@ if ($missing.Count -gt 0) {
     Fail "Missing: $($missing -join ', ')"
     Write-Host "   winget install Git.Git"
     Write-Host "   winget install OpenJS.NodeJS"
-    Write-Host "   winget install GitHub.cli"
-    Write-Host "   npm install -g @anthropic-ai/claude-code"
     exit 1
 }
 
-Ok "All tools found"
+$wslCmd = Get-Command "wsl.exe" -ErrorAction SilentlyContinue
+if (-not $wslCmd) {
+    Fail "WSL not found"
+    Write-Host "   Install WSL and a distro: wsl --install -d Ubuntu"
+    exit 1
+}
+
+& wsl.exe -e bash -lc "echo WSL_OK >/dev/null 2>&1"
+if ($LASTEXITCODE -ne 0) {
+    Fail "WSL is installed but not ready"
+    Write-Host "   Run: wsl --install -d Ubuntu"
+    Write-Host "   Then complete initial distro setup"
+    exit 1
+}
+
+$missingWsl = @()
+foreach ($tool in @("claude", "git", "gh")) {
+    & wsl.exe -e bash -lc "command -v $tool >/dev/null 2>&1"
+    if ($LASTEXITCODE -ne 0) {
+        $missingWsl += $tool
+    }
+}
+
+if ($missingWsl.Count -gt 0) {
+    Fail "Missing inside WSL: $($missingWsl -join ', ')"
+    Write-Host "   Open WSL and install:"
+    if ($missingWsl -contains "git") { Write-Host "     sudo apt update && sudo apt install -y git" }
+    if ($missingWsl -contains "gh") { Write-Host "     sudo apt install -y gh    # or follow GitHub CLI Linux instructions" }
+    if ($missingWsl -contains "claude") { Write-Host "     npm install -g @anthropic-ai/claude-code" }
+    exit 1
+}
+
+Ok "All tools found (Windows + WSL)"
 
 # ============================================================================
 # 1. PROJECT SETUP
@@ -576,178 +630,96 @@ Step "Generating launcher scripts and manifest..."
 $launcherDir = Join-Path $projectPath ".claude\launchers"
 if (-not (Test-Path $launcherDir)) { New-Item -ItemType Directory -Path $launcherDir -Force | Out-Null }
 
-# ── Fresh-start launcher scripts (PowerShell .ps1) ────────────────────────
-Step "Generating launcher scripts..."
+Step "Generating WSL launcher scripts..."
 
-# Master-2 .ps1
-@"
-Clear-Host
-Write-Host "`n  ████  I AM MASTER-2 — ARCHITECT (Opus)  ████`n" -ForegroundColor Magenta
-Set-Location "$projectPath"
-& claude --model opus --dangerously-skip-permissions '/scan-codebase'
-"@ | Set-Content (Join-Path $launcherDir "master-2.ps1")
-
-# Master-3 .ps1
-@"
-Clear-Host
-Write-Host "`n  ████  I AM MASTER-3 — ALLOCATOR (Sonnet)  ████`n" -ForegroundColor Yellow
-Set-Location "$projectPath"
-& claude --model sonnet --dangerously-skip-permissions '/scan-codebase-allocator'
-"@ | Set-Content (Join-Path $launcherDir "master-3.ps1")
-
-# Master-1 .ps1
-@"
-Clear-Host
-Write-Host "`n  ████  I AM MASTER-1 — YOUR INTERFACE (Sonnet)  ████`n" -ForegroundColor Green
-Set-Location "$projectPath"
-& claude --model sonnet --dangerously-skip-permissions '/master-loop'
-"@ | Set-Content (Join-Path $launcherDir "master-1.ps1")
-
-for ($i = 1; $i -le $workerCount; $i++) {
-    @"
-Clear-Host
-Write-Host "`n  ████  I AM WORKER-$i (Opus)  ████`n" -ForegroundColor Blue
-Set-Location "$projectPath\.worktrees\wt-$i"
-& claude --model opus --dangerously-skip-permissions '/worker-loop'
-"@ | Set-Content (Join-Path $launcherDir "worker-$i.ps1")
+function Get-AgentBanner([hashtable]$Agent, [bool]$ContinueMode) {
+    $base = switch ($Agent.id) {
+        "master-1" { "I AM MASTER-1 — YOUR INTERFACE (Sonnet)" }
+        "master-2" { "I AM MASTER-2 — ARCHITECT (Opus)" }
+        "master-3" { "I AM MASTER-3 — ALLOCATOR (Sonnet)" }
+        default { "I AM $($Agent.id.ToUpper()) ($($Agent.model))" }
+    }
+    if ($ContinueMode) { return "$base [CONTINUE]" }
+    return $base
 }
 
-# Continue-mode .ps1
-@"
-Clear-Host
-Write-Host "`n  ████  I AM MASTER-2 — ARCHITECT (Opus) [CONTINUE]  ████`n" -ForegroundColor Magenta
-Set-Location "$projectPath"
-& claude --continue --model opus --dangerously-skip-permissions
-"@ | Set-Content (Join-Path $launcherDir "master-2-continue.ps1")
-
-@"
-Clear-Host
-Write-Host "`n  ████  I AM MASTER-3 — ALLOCATOR (Sonnet) [CONTINUE]  ████`n" -ForegroundColor Yellow
-Set-Location "$projectPath"
-& claude --continue --model sonnet --dangerously-skip-permissions
-"@ | Set-Content (Join-Path $launcherDir "master-3-continue.ps1")
-
-@"
-Clear-Host
-Write-Host "`n  ████  I AM MASTER-1 — YOUR INTERFACE (Sonnet) [CONTINUE]  ████`n" -ForegroundColor Green
-Set-Location "$projectPath"
-& claude --continue --model sonnet --dangerously-skip-permissions
-"@ | Set-Content (Join-Path $launcherDir "master-1-continue.ps1")
-
-for ($i = 1; $i -le $workerCount; $i++) {
-    @"
-Clear-Host
-Write-Host "`n  ████  I AM WORKER-$i (Opus) [CONTINUE]  ████`n" -ForegroundColor Blue
-Set-Location "$projectPath\.worktrees\wt-$i"
-& claude --continue --model opus --dangerously-skip-permissions
-"@ | Set-Content (Join-Path $launcherDir "worker-$i-continue.ps1")
+function Get-WslClaudeCommand([hashtable]$Agent, [bool]$ContinueMode) {
+    $cwdWsl = Escape-BashSingleQuoted (Convert-ToWslPath $Agent.cwd)
+    if ($ContinueMode) {
+        return "cd '$cwdWsl' && exec claude --continue --model $($Agent.model) --dangerously-skip-permissions"
+    }
+    $slashCmd = Escape-BashSingleQuoted $Agent.fresh_slash
+    return "cd '$cwdWsl' && exec claude --model $($Agent.model) --dangerously-skip-permissions '$slashCmd'"
 }
 
-# ── .bat launchers ────────────────────────────────────────────────────────
-@"
-@echo off
-cls
-echo.
-echo   ████  I AM MASTER-2 — ARCHITECT (Opus)  ████
-echo.
-cd /d "$projectPath"
-claude --model opus --dangerously-skip-permissions "/scan-codebase"
-"@ | Set-Content (Join-Path $launcherDir "master-2.bat")
+function Write-WslLauncherPair([hashtable]$Agent, [bool]$ContinueMode) {
+    $suffix = if ($ContinueMode) { "-continue" } else { "" }
+    $banner = Get-AgentBanner $Agent $ContinueMode
+    $wslCommand = Get-WslClaudeCommand $Agent $ContinueMode
+    $wslCommandEscaped = $wslCommand -replace '"', '\"'
 
-@"
-@echo off
-cls
-echo.
-echo   ████  I AM MASTER-3 — ALLOCATOR (Sonnet)  ████
-echo.
-cd /d "$projectPath"
-claude --model sonnet --dangerously-skip-permissions "/scan-codebase-allocator"
-"@ | Set-Content (Join-Path $launcherDir "master-3.bat")
+    @"
+Clear-Host
+Write-Host "`n  ████  $banner  ████`n" -ForegroundColor Cyan
+& wsl.exe -e bash -lc "$wslCommandEscaped"
+"@ | Set-Content (Join-Path $launcherDir "$($Agent.id)$suffix.ps1")
 
-@"
-@echo off
-cls
-echo.
-echo   ████  I AM MASTER-1 — YOUR INTERFACE (Sonnet)  ████
-echo.
-cd /d "$projectPath"
-claude --model sonnet --dangerously-skip-permissions "/master-loop"
-"@ | Set-Content (Join-Path $launcherDir "master-1.bat")
-
-for ($i = 1; $i -le $workerCount; $i++) {
     @"
 @echo off
 cls
 echo.
-echo   ████  I AM WORKER-$i (Opus)  ████
+echo   ████  $banner  ████
 echo.
-cd /d "$projectPath\.worktrees\wt-$i"
-claude --model opus --dangerously-skip-permissions "/worker-loop"
-"@ | Set-Content (Join-Path $launcherDir "worker-$i.bat")
+wsl.exe -e bash -lc "$wslCommandEscaped"
+"@ | Set-Content (Join-Path $launcherDir "$($Agent.id)$suffix.bat")
 }
 
-# Continue .bat
-@"
-@echo off
-cls
-echo.
-echo   ████  I AM MASTER-2 — ARCHITECT (Opus) [CONTINUE]  ████
-echo.
-cd /d "$projectPath"
-claude --continue --model opus --dangerously-skip-permissions
-"@ | Set-Content (Join-Path $launcherDir "master-2-continue.bat")
-
-@"
-@echo off
-cls
-echo.
-echo   ████  I AM MASTER-3 — ALLOCATOR (Sonnet) [CONTINUE]  ████
-echo.
-cd /d "$projectPath"
-claude --continue --model sonnet --dangerously-skip-permissions
-"@ | Set-Content (Join-Path $launcherDir "master-3-continue.bat")
-
-@"
-@echo off
-cls
-echo.
-echo   ████  I AM MASTER-1 — YOUR INTERFACE (Sonnet) [CONTINUE]  ████
-echo.
-cd /d "$projectPath"
-claude --continue --model sonnet --dangerously-skip-permissions
-"@ | Set-Content (Join-Path $launcherDir "master-1-continue.bat")
+$agentDefinitions = @(
+    @{
+        id = "master-1"; group = "masters"; role = "Interface (Sonnet)"; model = "sonnet";
+        cwd = $projectPath; fresh_slash = "/master-loop"
+    },
+    @{
+        id = "master-2"; group = "masters"; role = "Architect (Opus)"; model = "opus";
+        cwd = $projectPath; fresh_slash = "/scan-codebase"
+    },
+    @{
+        id = "master-3"; group = "masters"; role = "Allocator (Sonnet)"; model = "sonnet";
+        cwd = $projectPath; fresh_slash = "/scan-codebase-allocator"
+    }
+)
 
 for ($i = 1; $i -le $workerCount; $i++) {
-    @"
-@echo off
-cls
-echo.
-echo   ████  I AM WORKER-$i (Opus) [CONTINUE]  ████
-echo.
-cd /d "$projectPath\.worktrees\wt-$i"
-claude --continue --model opus --dangerously-skip-permissions
-"@ | Set-Content (Join-Path $launcherDir "worker-$i-continue.bat")
+    $agentDefinitions += @{
+        id = "worker-$i"; group = "workers"; role = "Worker $i (Opus)"; model = "opus";
+        cwd = (Join-Path $projectPath ".worktrees\wt-$i"); fresh_slash = "/worker-loop"
+    }
 }
 
-Ok "Launcher scripts written (.bat, .ps1)"
+foreach ($agent in $agentDefinitions) {
+    Write-WslLauncherPair $agent $false
+    Write-WslLauncherPair $agent $true
+}
+
+Ok "Launcher scripts written (.bat, .ps1 via WSL)"
 
 # ── Generate manifest.json for GUI ───────────────────────────────────
 $manifestTimestamp = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
 
-$workerEntries = @()
-for ($i = 1; $i -le $workerCount; $i++) {
-    $workerEntries += @{
-        id                    = "worker-$i"
-        group                 = "workers"
-        role                  = "Worker $i (Opus)"
-        model                 = "opus"
-        cwd                   = "$projectPath\.worktrees\wt-$i"
-        launcher_win          = "$launcherDir\worker-$i.bat"
-        launcher_win_continue = "$launcherDir\worker-$i-continue.bat"
-        launcher_ps1          = "$launcherDir\worker-$i.ps1"
-        launcher_ps1_continue = "$launcherDir\worker-$i-continue.ps1"
-        command_fresh         = "claude --model opus --dangerously-skip-permissions '/worker-loop'"
-        command_continue      = "claude --continue --model opus --dangerously-skip-permissions"
+$manifestAgents = @()
+foreach ($agent in $agentDefinitions) {
+    $manifestAgents += @{
+        id                    = $agent.id
+        group                 = $agent.group
+        role                  = $agent.role
+        model                 = $agent.model
+        cwd                   = $agent.cwd
+        launcher_win          = ".claude/launchers/$($agent.id).bat"
+        launcher_win_continue = ".claude/launchers/$($agent.id)-continue.bat"
+        launcher_ps1          = ".claude/launchers/$($agent.id).ps1"
+        launcher_ps1_continue = ".claude/launchers/$($agent.id)-continue.ps1"
+        command_fresh         = (Get-WslClaudeCommand $agent $false)
+        command_continue      = (Get-WslClaudeCommand $agent $true)
     }
 }
 
@@ -756,47 +728,7 @@ $manifest = @{
     project_path = $projectPath
     worker_count = $workerCount
     created_at   = $manifestTimestamp
-    agents       = @(
-        @{
-            id                    = "master-1"
-            group                 = "masters"
-            role                  = "Interface (Sonnet)"
-            model                 = "sonnet"
-            cwd                   = $projectPath
-            launcher_win          = "$launcherDir\master-1.bat"
-            launcher_win_continue = "$launcherDir\master-1-continue.bat"
-            launcher_ps1          = "$launcherDir\master-1.ps1"
-            launcher_ps1_continue = "$launcherDir\master-1-continue.ps1"
-            command_fresh         = "claude --model sonnet --dangerously-skip-permissions '/master-loop'"
-            command_continue      = "claude --continue --model sonnet --dangerously-skip-permissions"
-        },
-        @{
-            id                    = "master-2"
-            group                 = "masters"
-            role                  = "Architect (Opus)"
-            model                 = "opus"
-            cwd                   = $projectPath
-            launcher_win          = "$launcherDir\master-2.bat"
-            launcher_win_continue = "$launcherDir\master-2-continue.bat"
-            launcher_ps1          = "$launcherDir\master-2.ps1"
-            launcher_ps1_continue = "$launcherDir\master-2-continue.ps1"
-            command_fresh         = "claude --model opus --dangerously-skip-permissions '/scan-codebase'"
-            command_continue      = "claude --continue --model opus --dangerously-skip-permissions"
-        },
-        @{
-            id                    = "master-3"
-            group                 = "masters"
-            role                  = "Allocator (Sonnet)"
-            model                 = "sonnet"
-            cwd                   = $projectPath
-            launcher_win          = "$launcherDir\master-3.bat"
-            launcher_win_continue = "$launcherDir\master-3-continue.bat"
-            launcher_ps1          = "$launcherDir\master-3.ps1"
-            launcher_ps1_continue = "$launcherDir\master-3-continue.ps1"
-            command_fresh         = "claude --model sonnet --dangerously-skip-permissions '/scan-codebase-allocator'"
-            command_continue      = "claude --continue --model sonnet --dangerously-skip-permissions"
-        }
-    ) + $workerEntries
+    agents       = $manifestAgents
 }
 
 $manifest | ConvertTo-Json -Depth 10 | Set-Content (Join-Path $launcherDir "manifest.json")
@@ -933,7 +865,7 @@ if ($launch -match "^[Yy]$") {
 
     if ($hasWt) {
         # ── Windows Terminal: tabbed launch ─────────────────────────────
-        Step "  Launching masters in Windows Terminal..."
+        Step "  Launching masters in Windows Terminal (WSL sessions)..."
 
         # Build wt command as a single string (wt requires this for semicolon-separated subcommands)
         # Titles must not contain spaces — wt splits on spaces and treats the rest as the command
@@ -945,7 +877,7 @@ if ($launch -match "^[Yy]$") {
         Start-Sleep -Seconds 2
         Ok "  3 master tabs created in Windows Terminal"
 
-        Step "  Launching workers in Windows Terminal..."
+        Step "  Launching workers in Windows Terminal (WSL sessions)..."
 
         # Build wt command for workers as a single string
         $wtWorkerCmd = "-w workers"
@@ -961,7 +893,7 @@ if ($launch -match "^[Yy]$") {
 
     } else {
         # ── Fallback: separate PowerShell windows ───────────────────────
-        Step "  Windows Terminal not found — launching separate PowerShell windows..."
+        Step "  Windows Terminal not found — launching separate PowerShell windows (WSL sessions)..."
 
         $psArgs = '-ExecutionPolicy Bypass -File "' + $m2Launcher + '"'
         Start-Process "powershell" -ArgumentList $psArgs

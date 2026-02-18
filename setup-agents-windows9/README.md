@@ -17,11 +17,18 @@ powershell -ExecutionPolicy Bypass -File setup.ps1 -Headless -RepoUrl "https://g
 ```powershell
 winget install Git.Git
 winget install OpenJS.NodeJS
-winget install GitHub.cli
+wsl --install -d Ubuntu
+```
+
+Inside WSL, install runtime tools used by agents:
+
+```bash
+sudo apt update
+sudo apt install -y git gh nodejs npm
 npm install -g @anthropic-ai/claude-code
 ```
 
-Windows Terminal (`wt`) is recommended for tabbed agent windows but not required — the installer falls back to separate PowerShell windows.
+Windows Terminal (`wt`) is recommended for tabbed agent windows but not required — the installer falls back to separate PowerShell windows that host WSL sessions.
 
 ## v3 Changelog (vs v8)
 
@@ -43,7 +50,7 @@ Windows Terminal (`wt`) is recommended for tabbed agent windows but not required
 ### Kept from v8
 - Modular 5-file structure
 - Tier-based routing (Tier 1/2/3)
-- Signal-based waking (polling-based on Windows)
+- Signal-based waking (via WSL Bash, polling fallback)
 - Living knowledge system with curation + instruction patching
 - Budget-based context tracking with pre-reset distillation
 - Reset staggering via agent-health.json
@@ -54,8 +61,8 @@ Windows Terminal (`wt`) is recommended for tabbed agent windows but not required
 
 | # | File | What's Inside | Purpose |
 |---|------|--------------|---------|
-| 1 | `setup.ps1` | **Main installer script (Windows)** — preflight, project setup, directories, state init, worktrees, launchers (`.ps1`/`.bat`), terminal launch via Windows Terminal or PowerShell | Executable installer |
-| 2 | `2-helper-scripts.sh` | **Runtime scripts** — `signal-wait.sh`, `state-lock.sh`, `pre-tool-secret-guard.sh`, `stop-notify.sh` (run via Git Bash) | Runtime support |
+| 1 | `setup.ps1` | **Main installer script (Windows)** — preflight, project setup, directories, state init, worktrees, WSL-backed launchers (`.ps1`/`.bat` wrappers), terminal launch via Windows Terminal or PowerShell | Executable installer |
+| 2 | `2-helper-scripts.sh` | **Runtime scripts** — `signal-wait.sh`, `state-lock.sh`, `pre-tool-secret-guard.sh`, `stop-notify.sh` (run inside WSL Bash) | Runtime support |
 | 3 | `3-project-config-and-templates.md` | **Project config** — `root-claude.md`, `worker-claude.md`, subagents, `settings.json`, knowledge templates, state templates | Template content |
 | 4 | `4-master-role-documents.md` | **Role docs** — Master-1 (Interface), Master-2 (Architect), Master-3 (Allocator) full self-contained specifications | Agent identity |
 | 5 | `5-command-loops.md` | **Commands** — `master-loop`, `architect-loop`, `allocate-loop`, `worker-loop`, `scan-codebase`, `scan-codebase-allocator`, `commit-push-pr` | Agent behavior |
@@ -76,9 +83,9 @@ User → Master-1 (Sonnet) → Master-2 (Opus) triage:
 ```
 ├── setup.ps1
 ├── scripts/
-│   ├── signal-wait.sh    (Git Bash)
-│   ├── state-lock.sh     (Git Bash)
-│   ├── add-worker.sh     (Git Bash)
+│   ├── signal-wait.sh    (WSL Bash)
+│   ├── state-lock.sh     (WSL Bash)
+│   ├── add-worker.sh     (WSL Bash)
 │   └── hooks/
 │       ├── pre-tool-secret-guard.sh
 │       └── stop-notify.sh
@@ -120,10 +127,11 @@ User → Master-1 (Sonnet) → Master-2 (Opus) triage:
 | Feature | Implementation |
 |---------|---------------|
 | Shared state links | `New-Item -ItemType Junction` (no admin needed) |
+| Agent runtime shell | WSL (`wsl.exe -e bash -lc ...`) |
 | Terminal tabs | Windows Terminal `wt -w <name> new-tab` |
-| Terminal fallback | `Start-Process powershell` (separate windows) |
+| Terminal fallback | `Start-Process powershell` (separate windows, each runs WSL) |
 | Filesystem watcher | Not checked (agents use polling) |
 | Argument style | `-RepoUrl VALUE` (PowerShell params) |
-| Install hint | `winget install Git.Git` etc. |
+| Install hint | `wsl --install -d Ubuntu` + install `claude` in WSL |
 
 Each file in this breakdown marks its original `FILE:` path with headers.

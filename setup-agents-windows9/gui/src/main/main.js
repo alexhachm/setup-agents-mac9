@@ -431,6 +431,11 @@ function readManifest(manifestPath) {
     return JSON.parse(raw);
 }
 
+function resolveManifestPath(pp, maybePath, fallbackPath) {
+    if (!maybePath) return fallbackPath;
+    return path.isAbsolute(maybePath) ? maybePath : path.join(pp, maybePath);
+}
+
 // Track launched processes per project
 const launchedProcesses = new Map(); // key: "projectPath:agentId"
 
@@ -492,10 +497,12 @@ ipcMain.handle('launch-agent', async (event, { agentId, projectPath: pp, continu
             // Windows: prefer .ps1 launchers, fall back to .bat, then raw command
             const launcherDir = path.join(pp, '.claude', 'launchers');
             const suffix = continueMode ? '-continue' : '';
-            const ps1File = agent.launcher_ps1 ? path.join(pp, agent.launcher_ps1)
-                : path.join(launcherDir, `${agent.id}${suffix}.ps1`);
-            const batFile = agent.launcher_win ? path.join(pp, agent.launcher_win)
-                : path.join(launcherDir, `${agent.id}${suffix}.bat`);
+            const defaultPs1 = path.join(launcherDir, `${agent.id}${suffix}.ps1`);
+            const defaultBat = path.join(launcherDir, `${agent.id}${suffix}.bat`);
+            const ps1Field = continueMode ? (agent.launcher_ps1_continue || agent.launcher_ps1) : agent.launcher_ps1;
+            const batField = continueMode ? (agent.launcher_win_continue || agent.launcher_win) : agent.launcher_win;
+            const ps1File = resolveManifestPath(pp, ps1Field, defaultPs1);
+            const batFile = resolveManifestPath(pp, batField, defaultBat);
 
             if (fs.existsSync(ps1File)) {
                 terminalCmd = `where wt >nul 2>nul && wt new-tab -d "${cwd}" --title ${agent.id} powershell.exe -ExecutionPolicy Bypass -File "${ps1File}" || start powershell.exe -ExecutionPolicy Bypass -File "${ps1File}"`;
@@ -570,9 +577,12 @@ ipcMain.handle('launch-group', async (event, { group, projectPath: pp, continueM
         } else if (process.platform === 'win32') {
             const launcherDir = path.join(pp, '.claude', 'launchers');
             const suffix = continueMode ? '-continue' : '';
-            const ps1File = agent.launcher_ps1 ? path.join(pp, agent.launcher_ps1)
-                : path.join(launcherDir, `${agent.id}${suffix}.ps1`);
-            const batFile = path.join(launcherDir, `${agent.id}${suffix}.bat`);
+            const defaultPs1 = path.join(launcherDir, `${agent.id}${suffix}.ps1`);
+            const defaultBat = path.join(launcherDir, `${agent.id}${suffix}.bat`);
+            const ps1Field = continueMode ? (agent.launcher_ps1_continue || agent.launcher_ps1) : agent.launcher_ps1;
+            const batField = continueMode ? (agent.launcher_win_continue || agent.launcher_win) : agent.launcher_win;
+            const ps1File = resolveManifestPath(pp, ps1Field, defaultPs1);
+            const batFile = resolveManifestPath(pp, batField, defaultBat);
 
             if (fs.existsSync(ps1File)) {
                 terminalCmd = `where wt >nul 2>nul && wt new-tab -d "${cwd}" --title ${agent.id} powershell.exe -ExecutionPolicy Bypass -File "${ps1File}" || start powershell.exe -ExecutionPolicy Bypass -File "${ps1File}"`;
