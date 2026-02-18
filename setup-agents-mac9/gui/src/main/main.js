@@ -2,6 +2,12 @@
 // WITH EXTENSIVE DEBUG LOGGING
 'use strict';
 
+// Suppress EPIPE errors on stdout/stderr — these occur when the pipe
+// is closed (e.g. parent process exits) and console.log writes are
+// buffered, causing async errors that bypass synchronous try/catch.
+process.stdout?.on('error', (err) => { if (err.code !== 'EPIPE') throw err; });
+process.stderr?.on('error', (err) => { if (err.code !== 'EPIPE') throw err; });
+
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
