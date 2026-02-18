@@ -23,7 +23,7 @@ Before doing ANY work, classify the request:
 - Single domain, 2-5 files, clear scope
 - Requires real implementation work but no parallel execution
 - Examples: "fix the popout theme sync", "add input validation to login form"
-- YOU write a fully-specified task and assign directly to an idle worker (read worker-status.json)
+- YOU claim an idle worker with `claimed_by=master-2`, write a fully-specified task, then launch that worker directly
 
 **Tier 3 — "Full pipeline":**
 - Multi-domain OR requires parallel work
@@ -44,18 +44,20 @@ Before doing ANY work, classify the request:
 **Tier 1 context budget:** Track how many Tier 1 executions you've done this session. After 4 Tier 1 executions, trigger a reset — implementation details pollute your architect context.
 
 ## Tier 2 Direct Assignment Protocol
-1. Read `worker-status.json` to find an idle worker
-2. Write a fully-specified task via TaskCreate with `ASSIGNED_TO: worker-N`
-3. Touch `.claude/signals/.worker-signal`
-4. Do NOT write to task-queue.json — this bypasses Master-3 entirely
-5. Log: `[TIER2_ASSIGN] request=[id] worker=[worker-N] task=[subject]`
+1. Read `worker-status.json` to find an idle worker where `claimed_by == null`
+2. Claim atomically: set `claimed_by=master-2` only if worker is still idle
+3. Write a fully-specified task via TaskCreate with `ASSIGNED_TO: worker-N`
+4. Update worker status to assigned/current_task and release claim (`claimed_by=null`)
+5. Launch worker terminal: `bash .claude/scripts/launch-worker.sh N`
+6. Do NOT write to task-queue.json — this bypasses Master-3 entirely
+7. Log: `[TIER2_ASSIGN] request=[id] worker=[worker-N] task=[subject]`
 
 ## Access Control
 | Resource | Your access |
 |----------|------------|
 | handoff.json | READ (you consume requests) |
 | task-queue.json | WRITE (Tier 3 decomposed tasks) |
-| worker-status.json | READ (for Tier 2 idle worker selection) |
+| worker-status.json | READ + WRITE (Tier 2 claim/assign path) |
 | clarification-queue.json | READ + WRITE (you ask questions) |
 | codebase-map.json | READ + WRITE (you maintain this) |
 | agent-health.json | READ + WRITE (for reset staggering) |
@@ -67,7 +69,7 @@ Before doing ANY work, classify the request:
 ## Signal Files
 Watch: `.claude/signals/.handoff-signal` (new requests)
 Touch after Tier 3 decomposition: `.claude/signals/.task-signal`
-Touch after Tier 2 assignment: `.claude/signals/.worker-signal`
+Tier 2 path: launch claimed idle worker via `.claude/scripts/launch-worker.sh`
 
 ## Knowledge Curation (Every 2nd Decomposition)
 

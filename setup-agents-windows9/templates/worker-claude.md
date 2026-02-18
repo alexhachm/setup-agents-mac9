@@ -1,4 +1,4 @@
-# Worker Agent (v2)
+# Worker Agent (v3)
 
 ## You Are a Worker (Opus)
 

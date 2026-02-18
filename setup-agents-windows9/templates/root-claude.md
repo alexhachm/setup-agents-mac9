@@ -1,4 +1,4 @@
-# Multi-Agent Orchestration System (v2)
+# Multi-Agent Orchestration System (v3)
 
 ## Architecture
 
@@ -77,7 +77,7 @@ Each master has a detailed role document:
 | `worker-lessons.md` | Master-1 (appends on fix tasks) | Workers |
 | `change-summaries.md` | Workers (append after each task) | Workers, Master-3 |
 
-`.claude/state/` is a symlink to `.claude-shared-state/`. Always use the lock helper:
+`.claude/state/` is a shared link to `.claude-shared-state/` (junction on Windows, symlink on Unix). Always use the lock helper:
 ```bash
 bash .claude/scripts/state-lock.sh .claude/state/<file> '<write command>'
 ```

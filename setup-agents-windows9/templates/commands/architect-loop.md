@@ -21,6 +21,7 @@ You have deep codebase knowledge from `/scan-codebase`. Your job is to **triage 
 tier1_count = 0       # Reset trigger at 4
 decomposition_count = 0  # Reset trigger at 6 (Tier 2 counts as 0.5)
 curation_due = false   # Set true every 2nd decomposition
+last_activity = now()  # For adaptive signal timeout
 ```
 
 ## Startup Message
@@ -115,18 +116,33 @@ echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [master-2] [TIER_CLASSIFY] id=[request_id
    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [master-2] [TIER1_EXECUTE] id=[request_id] file=[files] pr=[PR URL]" >> .claude/logs/activity.log
    ```
    `tier1_count += 1`
+   `last_activity = now()`
 
 8. **Check reset trigger:** If `tier1_count >= 4`, go to Step 7 (reset).
 
 Go to Step 6.
 
-### Step 3b: Tier 2 — Assign Directly to Worker
+### Step 3b: Tier 2 — Claim and Assign Directly to Worker
 
-1. Read worker-status.json to find an idle worker:
+1. Read worker-status.json to find an idle worker (skip any with `claimed_by` set):
    ```bash
    cat .claude/state/worker-status.json
    ```
-2. Write a fully-specified task directly via TaskCreate:
+2. **Claim the worker atomically** (prevents Master-3 race condition):
+   ```bash
+   claim_result=$(bash .claude/scripts/state-lock.sh .claude/state/worker-status.json '
+     if jq -e ".\"worker-N\".status == \"idle\" and .\"worker-N\".claimed_by == null" .claude/state/worker-status.json >/dev/null; then
+       jq ".\"worker-N\".claimed_by = \"master-2\"" .claude/state/worker-status.json > /tmp/ws.json && mv /tmp/ws.json .claude/state/worker-status.json
+       echo CLAIMED
+     else
+       echo SKIP
+     fi
+   ')
+   [ "$claim_result" = "CLAIMED" ] || echo "worker-N no longer claimable; choose another idle worker"
+   ```
+   If claim fails, pick another idle worker and retry Step 2.
+   Log success: `[TIER2_CLAIM] worker=worker-N`
+3. Write a fully-specified task directly via TaskCreate:
    ```
    TaskCreate({
      subject: "[task title]",
@@ -134,16 +150,22 @@ Go to Step 6.
      activeForm: "Working on [task]..."
    })
    ```
-3. Update handoff.json to `"assigned_tier2"`
-4. Signal the worker:
+4. Release claim and update worker status:
    ```bash
-   touch .claude/signals/.worker-signal
+   bash .claude/scripts/state-lock.sh .claude/state/worker-status.json 'jq ".\"worker-N\".claimed_by = null | .\"worker-N\".status = \"assigned\" | .\"worker-N\".current_task = \"[subject]\"" .claude/state/worker-status.json > /tmp/ws.json && mv /tmp/ws.json .claude/state/worker-status.json'
    ```
-5. Log:
+5. Update handoff.json to `"assigned_tier2"`
+6. **Launch the worker now** (it was claimed from `idle`):
+   ```bash
+   bash .claude/scripts/launch-worker.sh N
+   # Log: [LAUNCH_WORKER] worker=worker-N reason=tier2-assign
+   ```
+7. Log:
    ```bash
    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [master-2] [TIER2_ASSIGN] id=[request_id] worker=worker-N task=\"[subject]\"" >> .claude/logs/activity.log
    ```
    `decomposition_count += 0.5`
+   `last_activity = now()`
 
 Go to Step 6.
 
@@ -180,6 +202,7 @@ Go to Step 6.
    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [master-2] [DECOMPOSE_DONE] id=[request_id] tasks=[N] domains=[list]" >> .claude/logs/activity.log
    ```
    `decomposition_count += 1`
+   `last_activity = now()`
 
 ### Step 4: Curation check
 
@@ -196,6 +219,9 @@ If `curation_due` (every 2nd decomposition):
 If `tier1_count >= 4` OR `decomposition_count >= 6`:
 Go to Step 7 (reset).
 
+**Qualitative self-check (every 3rd decomposition):**
+Try listing all domains and their key files from memory. If you can't do it accurately, your context is degraded — go to Step 7 regardless of counters.
+
 Also check staleness:
 ```bash
 last_scan=$(jq -r '.scanned_at // "1970-01-01"' .claude/state/codebase-map.json 2>/dev/null)
@@ -206,9 +232,14 @@ If `commits_since >= 20` or changes span >50% of domains: full reset (Step 7).
 
 ### Step 6: Wait and repeat
 
+Adaptive signal timeout based on activity:
 ```bash
+# If you just processed a request → shorter timeout (stay responsive)
+# If nothing happened → longer timeout (save resources)
 bash .claude/scripts/signal-wait.sh .claude/signals/.handoff-signal 15
 ```
+Use 5s timeout if `last_activity` was < 30s ago. Use 15s otherwise.
+
 Go back to Step 1.
 
 ### Step 7: Pre-Reset Distillation and Reset

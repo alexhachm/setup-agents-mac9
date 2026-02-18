@@ -8,8 +8,8 @@ This folder contains the multi-agent orchestration system for **Windows**. For M
 # Run from PowerShell
 powershell -ExecutionPolicy Bypass -File setup.ps1
 
-# Headless example
-powershell -ExecutionPolicy Bypass -File setup.ps1 -Headless -RepoUrl "https://github.com/user/repo" -Workers 3 -SessionMode 1
+# Headless example (non-interactive conflict handling)
+powershell -ExecutionPolicy Bypass -File setup.ps1 -Headless -RepoUrl "https://github.com/user/repo" -Workers 3 -SessionMode 1 -IfExists abort
 ```
 
 ## Prerequisites
@@ -24,11 +24,15 @@ Inside WSL, install runtime tools used by agents:
 
 ```bash
 sudo apt update
-sudo apt install -y git gh nodejs npm
+sudo apt install -y git gh jq nodejs npm
 npm install -g @anthropic-ai/claude-code
 ```
 
-Windows Terminal (`wt`) is recommended for tabbed agent windows but not required — the installer falls back to separate PowerShell windows that host WSL sessions.
+Headless mode supports non-interactive existing-path policies:
+- `-IfExists prompt|abort|reclone` (default: `prompt`)
+- `-ForceReclone` (shortcut for `-IfExists reclone`)
+
+Windows Terminal (`wt`) is recommended for tabbed agent windows but not required — the installer falls back to separate PowerShell windows that host WSL sessions. Startup opens **masters only**; workers launch on demand when tasks are assigned.
 
 ## v3 Changelog (vs v8)
 
@@ -62,7 +66,7 @@ Windows Terminal (`wt`) is recommended for tabbed agent windows but not required
 | # | File | What's Inside | Purpose |
 |---|------|--------------|---------|
 | 1 | `setup.ps1` | **Main installer script (Windows)** — preflight, project setup, directories, state init, worktrees, WSL-backed launchers (`.ps1`/`.bat` wrappers), terminal launch via Windows Terminal or PowerShell | Executable installer |
-| 2 | `2-helper-scripts.sh` | **Runtime scripts** — `signal-wait.sh`, `state-lock.sh`, `pre-tool-secret-guard.sh`, `stop-notify.sh` (run inside WSL Bash) | Runtime support |
+| 2 | `2-helper-scripts.sh` | **Runtime scripts** — `signal-wait.sh`, `state-lock.sh`, `add-worker.sh`, `launch-worker.sh`, `pre-tool-secret-guard.sh`, `stop-notify.sh` (run inside WSL Bash) | Runtime support |
 | 3 | `3-project-config-and-templates.md` | **Project config** — `root-claude.md`, `worker-claude.md`, subagents, `settings.json`, knowledge templates, state templates | Template content |
 | 4 | `4-master-role-documents.md` | **Role docs** — Master-1 (Interface), Master-2 (Architect), Master-3 (Allocator) full self-contained specifications | Agent identity |
 | 5 | `5-command-loops.md` | **Commands** — `master-loop`, `architect-loop`, `allocate-loop`, `worker-loop`, `scan-codebase`, `scan-codebase-allocator`, `commit-push-pr` | Agent behavior |
@@ -86,6 +90,7 @@ User → Master-1 (Sonnet) → Master-2 (Opus) triage:
 │   ├── signal-wait.sh    (WSL Bash)
 │   ├── state-lock.sh     (WSL Bash)
 │   ├── add-worker.sh     (WSL Bash)
+│   ├── launch-worker.sh  (WSL Bash)
 │   └── hooks/
 │       ├── pre-tool-secret-guard.sh
 │       └── stop-notify.sh
@@ -132,6 +137,6 @@ User → Master-1 (Sonnet) → Master-2 (Opus) triage:
 | Terminal fallback | `Start-Process powershell` (separate windows, each runs WSL) |
 | Filesystem watcher | Not checked (agents use polling) |
 | Argument style | `-RepoUrl VALUE` (PowerShell params) |
-| Install hint | `wsl --install -d Ubuntu` + install `claude` in WSL |
+| Install hint | `wsl --install -d Ubuntu` + install `claude` + `jq` in WSL |
 
 Each file in this breakdown marks its original `FILE:` path with headers.

@@ -20,7 +20,7 @@ You are the operations manager running on **Sonnet** for speed. You have direct 
 
 ## Signal Files
 Watch: `.claude/signals/.task-signal`, `.claude/signals/.fix-signal`, `.claude/signals/.completion-signal`
-Touch after assignment: `.claude/signals/.worker-signal`
+After assignment: launch idle workers with `.claude/scripts/launch-worker.sh`; signal already-running workers with `.claude/signals/.worker-signal`
 
 ## Budget-Based Context Tracking
 
@@ -48,10 +48,17 @@ Before resetting:
 5. After restart, update `agent-health.json`: set status to "active"
 
 ## Allocation: Fresh Context > Queued Context
-(Same rules as v1 — see allocate-loop.md for full decision framework)
+Core policy:
+- Prefer idle workers with clean context for new domains
+- Keep follow-up/fix work on the same worker when possible
+- Skip workers where `claimed_by` is set (Master-2 Tier 2 claim in progress)
+- Respect task dependencies and avoid multi-task queueing per worker
 
 ## Worker Lifecycle Management
-(Same as v1 — budget-based reset for workers, domain mismatch resets)
+- Workers are launch-on-demand (no always-on polling pool)
+- Trigger worker reset when `tasks_completed >= 6` or budget is exceeded
+- Treat stale heartbeat as dead only for active/running workers (not idle workers with closed terminals)
+- Enforce domain mismatch safety: reassign/reset rather than forcing cross-domain execution
 
 ## Logging
 ```bash

@@ -28,7 +28,7 @@ I handle all your requests. Just type naturally:
 • "fix worker-1: [issue]" → Creates urgent fix task + records lesson
 • "status" → Shows queue, worker progress, and completed PRs
 
-Workers auto-continue after completing tasks — no approval needed.
+Workers launch on demand when assigned — no approval needed.
 Review PRs anytime via "status". Send fixes if something's wrong.
 
 What would you like to do?
@@ -86,7 +86,8 @@ User says: "fix worker-1: the button still doesn't work"
 **Action:**
 1. Create fix task (URGENT priority)
 2. Add lesson to knowledge/mistakes.md
-3. Signal Master-3
+3. Append lesson to legacy worker-lessons.md (backward compat)
+4. Signal Master-3
 
 **Step 1 - Create fix task:**
 ```bash
@@ -119,7 +120,7 @@ bash .claude/scripts/state-lock.sh .claude/knowledge/mistakes.md 'cat >> .claude
 LESSON'
 ```
 
-**Step 3 - Also append to legacy worker-lessons.md for backward compat:**
+**Step 3 - Append to legacy worker-lessons.md for backward compat:**
 ```bash
 bash .claude/scripts/state-lock.sh .claude/state/worker-lessons.md 'cat >> .claude/state/worker-lessons.md << WLESSON
 
@@ -130,7 +131,7 @@ bash .claude/scripts/state-lock.sh .claude/state/worker-lessons.md 'cat >> .clau
 WLESSON'
 ```
 
-Say: "Fix task created for Worker-N. Lesson recorded in knowledge system. Worker will pick this up as priority."
+Say: "Fix task created for Worker-N. Lesson recorded in the knowledge system. Worker will pick this up as priority."
 
 ### Type 3: Status Check
 User says: "status" / "what's happening" / "show workers"

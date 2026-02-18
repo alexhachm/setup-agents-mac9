@@ -10,6 +10,7 @@
 # Native Windows PowerShell installer (Windows-only package)
 #
 # USAGE: powershell -ExecutionPolicy Bypass -File setup.ps1
+#        powershell -ExecutionPolicy Bypass -File setup.ps1 -Headless -RepoUrl "<url>" -ProjectPath "<path>" -Workers 3 -SessionMode 1 -IfExists abort
 # ============================================================================
 
 param(
@@ -19,7 +20,10 @@ param(
     [string]$RepoUrl = "",
     [string]$ProjectPath = "",
     [int]$Workers = 0,
-    [string]$SessionMode = ""
+    [string]$SessionMode = "",
+    [ValidateSet("prompt", "abort", "reclone")]
+    [string]$IfExists = "prompt",
+    [switch]$ForceReclone
 )
 
 $ErrorActionPreference = "Continue"
@@ -35,7 +39,7 @@ function Fail($msg)  { Write-Host "   FAIL: $msg" -ForegroundColor Red }
 
 function Escape-BashSingleQuoted([string]$Value) {
     if ($null -eq $Value) { return "" }
-    return $Value -replace "'", "'\"'\"'"
+    return $Value -replace "'", '''"''"'''
 }
 
 function Convert-ToWslPath([string]$WindowsPath) {
@@ -55,6 +59,44 @@ function Convert-ToWslPath([string]$WindowsPath) {
         return "/mnt/$($matches[1].ToLower())/$($matches[2])"
     }
     return $normalized
+}
+
+function New-DefaultWorkerStatus([int]$Count) {
+    $workerStatus = @{}
+    for ($i = 1; $i -le $Count; $i++) {
+        $workerStatus["worker-$i"] = @{
+            status = "idle"
+            domain = $null
+            current_task = $null
+            tasks_completed = 0
+            context_budget = 0
+            queued_task = $null
+            awaiting_approval = $false
+            claimed_by = $null
+            last_heartbeat = $null
+        }
+    }
+    return ($workerStatus | ConvertTo-Json -Depth 6)
+}
+
+function New-DefaultAgentHealth() {
+    return @'
+{
+  "master-2": { "status": "starting", "last_reset": null, "tier1_count": 0, "decomposition_count": 0 },
+  "master-3": { "status": "starting", "last_reset": null, "context_budget": 0, "started_at": null },
+  "workers": {}
+}
+'@
+}
+
+function Get-StateFileDefaultContent([string]$FileName, [int]$WorkerCount) {
+    switch ($FileName) {
+        "clarification-queue.json" { return '{"questions":[],"responses":[]}' }
+        "task-queue.json" { return '{"tasks":[]}' }
+        "worker-status.json" { return (New-DefaultWorkerStatus $WorkerCount) }
+        "agent-health.json" { return (New-DefaultAgentHealth) }
+        default { return '{}' }
+    }
 }
 
 $MAX_WORKERS = 8
@@ -133,7 +175,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $missingWsl = @()
-foreach ($tool in @("claude", "git", "gh")) {
+foreach ($tool in @("claude", "git", "gh", "jq")) {
     & wsl.exe -e bash -lc "command -v $tool >/dev/null 2>&1"
     if ($LASTEXITCODE -ne 0) {
         $missingWsl += $tool
@@ -145,6 +187,7 @@ if ($missingWsl.Count -gt 0) {
     Write-Host "   Open WSL and install:"
     if ($missingWsl -contains "git") { Write-Host "     sudo apt update && sudo apt install -y git" }
     if ($missingWsl -contains "gh") { Write-Host "     sudo apt install -y gh    # or follow GitHub CLI Linux instructions" }
+    if ($missingWsl -contains "jq") { Write-Host "     sudo apt install -y jq" }
     if ($missingWsl -contains "claude") { Write-Host "     npm install -g @anthropic-ai/claude-code" }
     exit 1
 }
@@ -187,18 +230,31 @@ if (-not [string]::IsNullOrEmpty($repoUrl)) {
         $projectPath = if ([string]::IsNullOrEmpty($inputPath)) { $defaultPath } else { $inputPath }
     }
 
+    $ifExistsPolicy = $IfExists
+    if ($ForceReclone) { $ifExistsPolicy = "reclone" }
+    if ($Headless -and $ifExistsPolicy -eq "prompt") { $ifExistsPolicy = "abort" }
+
     if (Test-Path (Join-Path $projectPath ".git")) {
         Set-Location $projectPath
         $existingRemote = ""
         try { $existingRemote = git remote get-url origin 2>$null } catch {}
         $normalizedExisting = $existingRemote -replace "\.git$", ""
         $normalizedNew = $repoUrl -replace "\.git$", ""
-        if ($normalizedExisting -eq $normalizedNew) {
+        if ($normalizedExisting -eq $normalizedNew -and $ifExistsPolicy -ne "reclone") {
             git fetch origin
             try { git pull origin main --no-rebase 2>$null } catch {
                 try { git pull origin master --no-rebase 2>$null } catch {}
             }
             Ok "Updated existing repo"
+        } elseif ($ifExistsPolicy -eq "reclone") {
+            Set-Location $env:USERPROFILE
+            Remove-Item -Recurse -Force $projectPath
+            git clone $repoUrl $projectPath
+            Set-Location $projectPath
+            Ok "Re-cloned existing path due to -IfExists reclone"
+        } elseif ($ifExistsPolicy -eq "abort") {
+            Fail "Existing repository conflict at $projectPath (use -IfExists reclone or -ForceReclone)"
+            exit 1
         } else {
             $del = Read-Host "   Different remote exists. Delete and re-clone? [y/N]"
             if ($del -match "^[Yy]$") {
@@ -211,13 +267,23 @@ if (-not [string]::IsNullOrEmpty($repoUrl)) {
             }
         }
     } elseif (Test-Path $projectPath) {
-        $del = Read-Host "   Directory exists. Delete and clone? [y/N]"
-        if ($del -match "^[Yy]$") {
+        if ($ifExistsPolicy -eq "reclone") {
             Remove-Item -Recurse -Force $projectPath
             git clone $repoUrl $projectPath
             Set-Location $projectPath
+            Ok "Re-cloned existing directory due to -IfExists reclone"
+        } elseif ($ifExistsPolicy -eq "abort") {
+            Fail "Directory exists at $projectPath (use -IfExists reclone or -ForceReclone)"
+            exit 1
         } else {
-            Fail "Aborted"; exit 1
+            $del = Read-Host "   Directory exists. Delete and clone? [y/N]"
+            if ($del -match "^[Yy]$") {
+                Remove-Item -Recurse -Force $projectPath
+                git clone $repoUrl $projectPath
+                Set-Location $projectPath
+            } else {
+                Fail "Aborted"; exit 1
+            }
         }
     } else {
         git clone $repoUrl $projectPath
@@ -334,21 +400,9 @@ Ok "Activity log initialized"
 Step "Initializing state files..."
 
 $stateDir = Join-Path $projectPath ".claude\state"
-'{}' | Set-Content (Join-Path $stateDir "handoff.json")
-'{}' | Set-Content (Join-Path $stateDir "codebase-map.json")
-'{}' | Set-Content (Join-Path $stateDir "worker-status.json")
-'{}' | Set-Content (Join-Path $stateDir "fix-queue.json")
-'{"questions":[],"responses":[]}' | Set-Content (Join-Path $stateDir "clarification-queue.json")
-'{"tasks":[]}' | Set-Content (Join-Path $stateDir "task-queue.json")
-
-$agentHealth = @'
-{
-  "master-2": { "status": "starting", "last_reset": null, "tier1_count": 0, "decomposition_count": 0 },
-  "master-3": { "status": "starting", "last_reset": null, "context_budget": 0, "started_at": null },
-  "workers": {}
+foreach ($jsonStateFile in @("handoff.json","codebase-map.json","worker-status.json","fix-queue.json","clarification-queue.json","task-queue.json","agent-health.json")) {
+    (Get-StateFileDefaultContent $jsonStateFile $workerCount) | Set-Content (Join-Path $stateDir $jsonStateFile)
 }
-'@
-$agentHealth | Set-Content (Join-Path $stateDir "agent-health.json")
 
 Copy-Item (Join-Path $ScriptDir "templates\state\worker-lessons.md") (Join-Path $stateDir "worker-lessons.md") -Force
 Copy-Item (Join-Path $ScriptDir "templates\state\change-summaries.md") (Join-Path $stateDir "change-summaries.md") -Force
@@ -411,8 +465,9 @@ Step "Creating helper scripts..."
 $projectScriptsDir = Join-Path $projectPath ".claude\scripts"
 Copy-Item (Join-Path $ScriptDir "scripts\add-worker.sh") (Join-Path $projectScriptsDir "add-worker.sh") -Force
 Copy-Item (Join-Path $ScriptDir "scripts\signal-wait.sh") (Join-Path $projectScriptsDir "signal-wait.sh") -Force
+Copy-Item (Join-Path $ScriptDir "scripts\launch-worker.sh") (Join-Path $projectScriptsDir "launch-worker.sh") -Force
 
-Ok "Helper scripts created (including signal-wait.sh)"
+Ok "Helper scripts created (including signal-wait.sh, launch-worker.sh)"
 
 # ============================================================================
 # 11. HOOKS
@@ -422,9 +477,11 @@ Step "Creating hooks..."
 $hooksDir = Join-Path $projectPath ".claude\hooks"
 Copy-Item (Join-Path $ScriptDir "scripts\hooks\pre-tool-secret-guard.sh") (Join-Path $hooksDir "pre-tool-secret-guard.sh") -Force
 Copy-Item (Join-Path $ScriptDir "scripts\hooks\stop-notify.sh") (Join-Path $hooksDir "stop-notify.sh") -Force
-Copy-Item (Join-Path $ScriptDir "scripts\hooks\pre-tool-secret-guard.ps1") (Join-Path $hooksDir "pre-tool-secret-guard.ps1") -Force
-Copy-Item (Join-Path $ScriptDir "scripts\hooks\stop-notify.ps1") (Join-Path $hooksDir "stop-notify.ps1") -Force
 Copy-Item (Join-Path $ScriptDir "scripts\state-lock.sh") (Join-Path $projectScriptsDir "state-lock.sh") -Force
+
+# Ensure WSL shell scripts are executable
+$projectPathWsl = Escape-BashSingleQuoted (Convert-ToWslPath $projectPath)
+& wsl.exe -e bash -lc "chmod +x '$projectPathWsl/.claude/scripts/add-worker.sh' '$projectPathWsl/.claude/scripts/signal-wait.sh' '$projectPathWsl/.claude/scripts/launch-worker.sh' '$projectPathWsl/.claude/scripts/state-lock.sh' '$projectPathWsl/.claude/hooks/pre-tool-secret-guard.sh' '$projectPathWsl/.claude/hooks/stop-notify.sh'" 2>$null
 
 Ok "Hooks created"
 
@@ -530,7 +587,7 @@ if ($stateItem -and $stateItem.Attributes -band [System.IO.FileAttributes]::Repa
     New-Item -ItemType Directory -Path $stateDir -Force | Out-Null
     foreach ($f in @("handoff.json","codebase-map.json","worker-status.json","fix-queue.json","clarification-queue.json","task-queue.json","agent-health.json")) {
         if (-not (Test-Path (Join-Path $sharedStateDir $f))) {
-            '{}' | Set-Content (Join-Path $stateDir $f)
+            (Get-StateFileDefaultContent $f $workerCount) | Set-Content (Join-Path $stateDir $f)
         }
     }
 }
@@ -546,12 +603,13 @@ foreach ($f in $stateFiles) {
     # Initialize shared file if missing
     if (-not (Test-Path $dst)) {
         switch ($f) {
-            "clarification-queue.json" { '{"questions":[],"responses":[]}' | Set-Content $dst }
-            "task-queue.json" { '{"tasks":[]}' | Set-Content $dst }
-            "agent-health.json" { Copy-Item (Join-Path $stateDir "agent-health.json") $dst -Force }
             "worker-lessons.md" { Copy-Item (Join-Path $ScriptDir "templates\state\worker-lessons.md") $dst -Force }
             "change-summaries.md" { Copy-Item (Join-Path $ScriptDir "templates\state\change-summaries.md") $dst -Force }
-            default { '{}' | Set-Content $dst }
+            default {
+                if ($f -like "*.json") {
+                    (Get-StateFileDefaultContent $f $workerCount) | Set-Content $dst
+                }
+            }
         }
     }
 }
@@ -755,15 +813,14 @@ Write-Host '  Tier 1: Trivial -> Master-2 executes directly (~2-5 min)'
 Write-Host '  Tier 2: Single domain -> Master-2 assigns to one worker (~5-15 min)'
 Write-Host '  Tier 3: Multi-domain -> Full decomposition pipeline (~20-60 min)'
 Write-Host ""
-$totalTerminals = $workerCount + 3
-Write-Host "TERMINALS NEEDED: $totalTerminals"
+Write-Host "TERMINALS AT STARTUP: 3 (masters only — workers launch on demand)"
 Write-Host ""
 
 # In headless mode, launching depends on session-mode argument
 if ($Headless) {
     $launch = if ($SessionMode) { "Y" } else { "N" }
 } else {
-    $launch = Read-Host "Launch all terminals now? [Y/n]"
+    $launch = Read-Host "Launch master terminals now? [Y/n]"
     if ([string]::IsNullOrEmpty($launch)) { $launch = "Y" }
 }
 
@@ -795,12 +852,13 @@ if ($launch -match "^[Yy]$") {
     } else {
         Step "Resetting sessions (wiping ALL Claude Code state)..."
 
-        foreach ($f in @("handoff.json","codebase-map.json","worker-status.json","fix-queue.json")) {
+        foreach ($f in @("handoff.json","codebase-map.json","fix-queue.json")) {
             '{}' | Set-Content (Join-Path $sharedStateDir $f) -ErrorAction SilentlyContinue
         }
+        (New-DefaultWorkerStatus $workerCount) | Set-Content (Join-Path $sharedStateDir "worker-status.json") -ErrorAction SilentlyContinue
         '{"questions":[],"responses":[]}' | Set-Content (Join-Path $sharedStateDir "clarification-queue.json") -ErrorAction SilentlyContinue
         '{"tasks":[]}' | Set-Content (Join-Path $sharedStateDir "task-queue.json") -ErrorAction SilentlyContinue
-        $agentHealth | Set-Content (Join-Path $sharedStateDir "agent-health.json") -ErrorAction SilentlyContinue
+        (New-DefaultAgentHealth) | Set-Content (Join-Path $sharedStateDir "agent-health.json") -ErrorAction SilentlyContinue
 
         # NOTE: Knowledge files are NOT wiped on fresh start — they are persistent learnings
 
@@ -812,6 +870,13 @@ if ($launch -match "^[Yy]$") {
         Remove-Item (Join-Path $claudeHome "tasks") -Recurse -Force -ErrorAction SilentlyContinue
         Remove-Item (Join-Path $claudeHome "plans") -Recurse -Force -ErrorAction SilentlyContinue
         Remove-Item (Join-Path $claudeHome "shell-snapshots") -Recurse -Force -ErrorAction SilentlyContinue
+
+        # Agents run inside WSL; wipe Linux Claude state too for a true fresh reset.
+        $wslClaudeReset = @'
+rm -rf "$HOME/.claude/projects" "$HOME/.claude/session-env" "$HOME/.claude/todos" "$HOME/.claude/tasks" "$HOME/.claude/plans" "$HOME/.claude/shell-snapshots" 2>/dev/null || true
+rm -f "$HOME/.claude/history.jsonl" 2>/dev/null || true
+'@
+        & wsl.exe -e bash -lc $wslClaudeReset 2>$null
 
         Remove-Item (Join-Path $projectPath ".claude\todos.json") -Force -ErrorAction SilentlyContinue
         Remove-Item (Join-Path $projectPath ".claude\.tasks") -Recurse -Force -ErrorAction SilentlyContinue
@@ -852,12 +917,10 @@ if ($launch -match "^[Yy]$") {
         $m1Launcher = Join-Path $launcherDir "master-1-continue.ps1"
         $m2Launcher = Join-Path $launcherDir "master-2-continue.ps1"
         $m3Launcher = Join-Path $launcherDir "master-3-continue.ps1"
-        $wSuffix = "-continue"
     } else {
         $m1Launcher = Join-Path $launcherDir "master-1.ps1"
         $m2Launcher = Join-Path $launcherDir "master-2.ps1"
         $m3Launcher = Join-Path $launcherDir "master-3.ps1"
-        $wSuffix = ""
     }
 
     # Detect Windows Terminal
@@ -876,20 +939,7 @@ if ($launch -match "^[Yy]$") {
         Start-Process "wt.exe" -ArgumentList $wtMasterCmd
         Start-Sleep -Seconds 2
         Ok "  3 master tabs created in Windows Terminal"
-
-        Step "  Launching workers in Windows Terminal (WSL sessions)..."
-
-        # Build wt command for workers as a single string
-        $wtWorkerCmd = "-w workers"
-        for ($i = 1; $i -le $workerCount; $i++) {
-            $wLauncher = Join-Path $launcherDir "worker-$i$wSuffix.ps1"
-            $wtDir = Join-Path $projectPath ".worktrees\wt-$i"
-            if ($i -gt 1) { $wtWorkerCmd += " `;" }
-            $wtWorkerCmd += " new-tab -d `"$wtDir`" --title `"Worker-$i`" powershell.exe -ExecutionPolicy Bypass -File `"$wLauncher`""
-        }
-        Start-Process "wt.exe" -ArgumentList $wtWorkerCmd
-        Start-Sleep -Seconds 2
-        Ok "  $workerCount worker tabs created in Windows Terminal"
+        Ok "  Workers launch on demand via .claude/scripts/launch-worker.sh"
 
     } else {
         # ── Fallback: separate PowerShell windows ───────────────────────
@@ -905,19 +955,12 @@ if ($launch -match "^[Yy]$") {
         Start-Process "powershell" -ArgumentList $psArgs
         Start-Sleep -Seconds 1
         Ok "  3 master windows created"
-
-        for ($i = 1; $i -le $workerCount; $i++) {
-            $wLauncher = Join-Path $launcherDir "worker-$i$wSuffix.ps1"
-            $psArgs = '-ExecutionPolicy Bypass -File "' + $wLauncher + '"'
-            Start-Process "powershell" -ArgumentList $psArgs
-            Start-Sleep -Seconds 1
-        }
-        Ok "  $workerCount worker windows created"
+        Ok "  Workers launch on demand in separate windows if needed"
     }
 
     Write-Host ""
     Write-Host "========================================" -ForegroundColor Green
-    Write-Host '  ALL TERMINALS LAUNCHED (v3)' -ForegroundColor Green
+    Write-Host '  MASTERS LAUNCHED (v3)' -ForegroundColor Green
     Write-Host "========================================" -ForegroundColor Green
     Write-Host ""
     if ($claudeSessionFlag -eq "--continue") {
@@ -931,15 +974,16 @@ if ($launch -match "^[Yy]$") {
     Write-Host '  Tab 2: MASTER-3 (Sonnet) - Allocator (scanning, then routing)'
     Write-Host '  Tab 3: MASTER-1 (Sonnet) - Interface (talk here)'
     Write-Host ""
-    Write-Host "WORKERS WINDOW `($workerCount tabs`):"
+    Write-Host "WORKERS (on-demand launch, $workerCount worktrees ready):"
     for ($i = 1; $i -le $workerCount; $i++) {
-        Write-Host "  Tab $i`: WORKER-$i `(Opus`)"
+        Write-Host "  Worker-$i (Opus): .worktrees\\wt-$i"
     }
     Write-Host ""
     Write-Host 'Tier 1 tasks (trivial): Master-2 executes directly (~2-5 min)' -ForegroundColor Yellow
     Write-Host 'Tier 2 tasks (single domain): Assigned to one worker via claim-lock (~5-15 min)' -ForegroundColor Yellow
     Write-Host 'Tier 3 tasks (multi-domain): Full decomposition pipeline (~20-60 min)' -ForegroundColor Yellow
     Write-Host ""
+    Write-Host "Workers launch ON DEMAND — no idle polling, lower cost." -ForegroundColor Yellow
     Write-Host "Knowledge persists across resets - system improves over time." -ForegroundColor Yellow
     Write-Host 'Just talk to MASTER-1 (Tab 3, Masters window)!' -ForegroundColor Yellow
     Write-Host ""
