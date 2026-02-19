@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld('electron', {
     getState: (filename) => ipcRenderer.invoke('get-state', filename),
     getActivityLog: (lines) => ipcRenderer.invoke('get-activity-log', lines),
     writeState: (filename, data) => ipcRenderer.invoke('write-state', { filename, data }),
+    touchSignal: (signalName) => ipcRenderer.invoke('touch-signal', signalName),
 
     onStateChanged: (callback) => {
         ipcRenderer.on('state-changed', (event, filename) => callback(filename));
@@ -54,6 +55,7 @@ contextBridge.exposeInMainWorld('electron', {
     getRecentProjects: () => ipcRenderer.invoke('get-recent-projects'),
     browseDirectory: () => ipcRenderer.invoke('browse-directory'),
     getSetupScriptDir: () => ipcRenderer.invoke('get-setup-script-dir'),
+    checkProjectSetup: (path) => ipcRenderer.invoke('check-project-setup', path),
     onSetupProgress: (callback) => ipcRenderer.on('setup-progress', (_, data) => callback(data)),
 });
 

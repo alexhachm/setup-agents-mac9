@@ -1,0 +1,35 @@
+{
+  "provider": "codex",
+  "bin": "codex",
+  "launch_mode_templates": {
+    "fresh": "{{bin}} --model {{model}} --cwd {{cwd}} --prompt-file {{prompt_file}}",
+    "continue": "{{bin}} --continue --model {{model}} --cwd {{cwd}} --prompt-file {{prompt_file}}"
+  },
+  "model_map": {
+    "fast": "codex-5.3-high",
+    "deep": "codex-5.3-high",
+    "economy": "gpt-5.2-pro",
+    "highest": "codex-5.3-xhigh"
+  },
+  "session_mode": {
+    "native_continue": true,
+    "emulated_continue_note": "If native continue is unavailable, load state/logs and resume from persisted artifacts."
+  },
+  "env_policy": {
+    "unset": [
+      "LEGACY_AGENT_MODE",
+      "LEGACY_SESSION_ID",
+      "LEGACY_PROVIDER_ENV"
+    ],
+    "set": {
+      "CODEX_PROVIDER": "codex",
+      "CODEX_PROJECT_DIR": "{{cwd}}",
+      "CODEX_AGENT_ID": "{{agent_id}}"
+    }
+  },
+  "runner_behavior": {
+    "startup_prompt_path": ".codex/runtime-prompts",
+    "load_role_doc": true,
+    "load_loop_doc": true
+  }
+}

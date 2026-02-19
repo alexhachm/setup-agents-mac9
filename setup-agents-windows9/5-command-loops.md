@@ -7,14 +7,13 @@
 #
 # v3 changes vs v8:
 #   - master-loop: Added signal file touches, lesson append to CLAUDE.md (from v7)
-#   - architect-loop: Restored qualitative self-monitoring (from v7), added
-#     Tier 2 claim-before-assign protocol, added adaptive signal timeouts
-#   - allocate-loop: Restored adaptive polling (from v7, adapted to signals),
-#     restored full worker-status JSON schema with awaiting_approval (from v7),
-#     added claimed_by check for Tier 2 coordination
-#   - worker-loop: Restored emergency commands (from v7), restored self-check
-#     instructions (from v7), restored task protocol quick-reference,
-#     added adaptive signal timeouts (shorter after task completion)
+#   - architect-loop: Added launch-or-signal in Tier 2 (launch idle workers
+#     via launch-worker.sh). Restored qualitative self-monitoring, adaptive timeouts
+#   - allocate-loop: Added launch-or-signal logic (launch idle workers via
+#     launch-worker.sh, signal running workers). Skip idle workers in heartbeat
+#     check. Restored adaptive polling and claimed_by Tier 2 coordination.
+#   - worker-loop: Rewritten for launch-on-demand — linear flow with EXIT
+#     instead of infinite loop. No idle polling. Workers exit when no task.
 #   - scan-codebase: Unchanged from v8 (progressive 2-pass is an improvement)
 #   - scan-codebase-allocator: Strengthened independent fallback scan to do
 #     real structure + coupling analysis when Master-2 is unavailable (from v7)
@@ -392,9 +391,17 @@ Go to Step 6.
    bash .claude/scripts/state-lock.sh .claude/state/worker-status.json 'jq ".\"worker-N\".claimed_by = null | .\"worker-N\".status = \"assigned\" | .\"worker-N\".current_task = \"[subject]\"" .claude/state/worker-status.json > /tmp/ws.json && mv /tmp/ws.json .claude/state/worker-status.json'
    ```
 5. Update handoff.json to `"assigned_tier2"`
-6. Signal the worker:
+6. **Launch or signal the worker:**
    ```bash
-   touch .claude/signals/.worker-signal
+   worker_status=$(jq -r '.["worker-N"].status' .claude/state/worker-status.json)
+
+   if [ "$worker_status" = "idle" ]; then
+       bash .claude/scripts/launch-worker.sh N
+       # Log: [LAUNCH_WORKER] worker=worker-N reason=tier2-assign
+   else
+       touch .claude/signals/.worker-signal
+       # Log: [SIGNAL_WORKER] worker=worker-N reason=tier2-assign
+   fi
    ```
 7. Log:
    ```bash
@@ -580,9 +587,21 @@ cat .claude/state/fix-queue.json
 If file contains a fix task:
 1. Create the task with TaskCreate (ASSIGNED_TO the specified worker, PRIORITY: URGENT)
 2. Clear fix-queue.json
-3. Signal the worker: `touch .claude/signals/.worker-signal`
-4. `context_budget += 30`
-5. `last_activity = now()`
+3. Update worker-status.json with the task assignment
+4. **Launch or signal the worker:**
+```bash
+worker_status=$(jq -r '.["worker-N"].status' .claude/state/worker-status.json)
+
+if [ "$worker_status" = "idle" ]; then
+    bash .claude/scripts/launch-worker.sh N
+    # Log: [LAUNCH_WORKER] worker=worker-N reason=fix-task
+else
+    touch .claude/signals/.worker-signal
+    # Log: [SIGNAL_WORKER] worker=worker-N reason=fix-task
+fi
+```
+5. `context_budget += 30`
+6. `last_activity = now()`
 
 ### Step 3: Check for Tier 3 decomposed tasks from Master-2
 ```bash
@@ -597,7 +616,18 @@ If there are tasks to allocate:
 5. Create tasks with TaskCreate, assigning to chosen workers
 6. Update worker-status.json (use lock helper)
 7. Clear processed tasks from task-queue.json
-8. Signal workers: `touch .claude/signals/.worker-signal`
+8. **Launch or signal each assigned worker:**
+```bash
+worker_status=$(jq -r '.["worker-N"].status' .claude/state/worker-status.json)
+
+if [ "$worker_status" = "idle" ]; then
+    bash .claude/scripts/launch-worker.sh N
+    # Log: [LAUNCH_WORKER] worker=worker-N reason=tier3-task
+else
+    touch .claude/signals/.worker-signal
+    # Log: [SIGNAL_WORKER] worker=worker-N reason=tier3-task
+fi
+```
 9. Log each allocation with reasoning
 10. `context_budget += 50 per task allocated`
 11. `last_activity = now()`
@@ -628,7 +658,8 @@ If ALL tasks for a request_id are "completed":
 
 ### Step 6: Heartbeat check (every 3rd cycle)
 If `polling_cycle % 3 == 0`:
-- Check for dead workers (>90s stale heartbeat)
+- **Skip workers with status "idle"** — they are NOT running (no terminal open), so no heartbeat expected
+- Only check "running"/"busy" workers for stale heartbeats (>90s → set status to "idle")
 - Update agent-health.json with current context_budget
 
 ### Step 7: Reset check
@@ -748,7 +779,7 @@ When a worker's `context_budget` exceeds 8000 OR `tasks_completed >= 6`:
 # ==============================================================================
 
 ---
-description: Worker loop with signal-based waking, knowledge reading, budget tracking, pre-reset distillation, self-check, and emergency commands.
+description: Worker loop — launch on demand, do task, exit when idle. No infinite polling.
 ---
 
 You are a **Worker** running on **Opus**. Check your branch to know your ID:
@@ -757,14 +788,12 @@ git branch --show-current
 ```
 - agent-1 → worker-1, agent-2 → worker-2, etc.
 
-## Startup
+## Phase 1: Startup
 
 1. Determine your worker ID from branch name
-2. Register yourself in worker-status.json:
+2. Set status to "running" in worker-status.json:
 ```bash
-cat .claude/state/worker-status.json
-# Add/update your entry using lock:
-# "worker-N": {"status": "idle", "domain": null, "current_task": null, "tasks_completed": 0, "context_budget": 0, "queued_task": null, "awaiting_approval": false, "claimed_by": null, "last_heartbeat": "<ISO>"}
+bash .claude/scripts/state-lock.sh .claude/state/worker-status.json 'jq ".\"worker-N\".status = \"running\" | .\"worker-N\".last_heartbeat = \"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'\"" .claude/state/worker-status.json > /tmp/ws.json && mv /tmp/ws.json .claude/state/worker-status.json'
 ```
 
 3. Announce:
@@ -772,7 +801,7 @@ cat .claude/state/worker-status.json
 ████  I AM WORKER-N (Opus)  ████
 
 Domain: none (assigned on first task)
-Status: idle, waiting for signal...
+Status: running, checking for assigned task...
 ```
 
 4. **Read knowledge files (CRITICAL — do this before any work):**
@@ -790,8 +819,6 @@ Internalize the mistakes — they are hard-won knowledge from this project.
 cat .claude/state/worker-lessons.md
 ```
 
-6. Begin the loop
-
 ## Internal Budget Tracking
 ```
 context_budget = 0
@@ -803,21 +830,9 @@ context_budget = 0
 # Hard cap: 6 tasks completed
 ```
 
-## The Loop (Explicit Steps)
+## Phase 2: Find and Execute Task
 
-**Repeat these steps forever:**
-
-### Step 0: Heartbeat
-Update `last_heartbeat` in worker-status.json every cycle.
-
-### Step 1: Wait for signal (adaptive timeout)
-```bash
-# Adaptive: 3s if you just completed a task (next task may be queued)
-# 10s otherwise (normal idle polling)
-bash .claude/scripts/signal-wait.sh .claude/signals/.worker-signal 10
-```
-
-### Step 2: Check for tasks
+### Step 1: Check for assigned task
 ```bash
 TaskList()
 ```
@@ -826,15 +841,22 @@ Look for tasks where:
 - Description contains `ASSIGNED_TO: worker-N` (your ID)
 - Status is "pending" or "open"
 
+**If no task found:** Wait 5 seconds, then check once more:
+```bash
+sleep 5
+TaskList()
+```
+If still no task → go to **Phase 3 (No-Task Exit)**.
+
 **RESET tasks take absolute priority.** If subject starts with "RESET:":
-1. **Distill first** (Step 6a)
+1. **Distill first** (Phase 4)
 2. Mark task complete
-3. Update worker-status.json: `status: "resetting", tasks_completed: 0, domain: null, context_budget: 0`
-4. `/clear` → `/worker-loop`
+3. Update worker-status.json: `status: "idle", tasks_completed: 0, domain: null, context_budget: 0`
+4. **EXIT** (terminal will close)
 
 Also check for URGENT fix tasks (priority over normal).
 
-### Step 3: If task found - validate domain
+### Step 2: Validate domain
 
 **If this is your FIRST task:**
 - Extract DOMAIN from task description
@@ -849,40 +871,42 @@ fi
 ```
 
 **If you already have a domain:**
-- Check domain match. Mismatch = error, skip, sleep 10, go to Step 1.
+- Check domain match. Mismatch = error, skip task, set "idle", **EXIT**.
 
-### Step 4: Claim and work
+### Step 3: Claim and work
 
-1. **Claim:** `TaskUpdate(task_id, status="in_progress", owner="worker-N")`
+1. **Heartbeat:** Update `last_heartbeat` in worker-status.json
 
-2. **Update status** (with lock): status="busy", current_task="[subject]"
+2. **Claim:** `TaskUpdate(task_id, status="in_progress", owner="worker-N")`
 
-3. **Read recent changes:**
+3. **Update status** (with lock): status="busy", current_task="[subject]"
+
+4. **Read recent changes:**
 ```bash
 cat .claude/state/change-summaries.md
 ```
 `context_budget += 20`
 
-4. **Announce:** CLAIMED: [task subject], Domain: [domain], Files: [files]
+5. **Announce:** CLAIMED: [task subject], Domain: [domain], Files: [files]
 
-5. **Plan** (Shift+Tab twice for Plan Mode if complex)
+6. **Plan** (Shift+Tab twice for Plan Mode if complex)
 `context_budget += 30`
 
-6. **Review** (if 5+ files): Spawn code-architect subagent
+7. **Review** (if 5+ files): Spawn code-architect subagent
 `context_budget += 100`
 
-7. **Build:** Implement changes following existing patterns
+8. **Build:** Implement changes following existing patterns
 `context_budget += (files_read × lines / 10) + (edits × 20)`
 
-8. **Verify** (based on VALIDATION tag in task description):
+9. **Verify** (based on VALIDATION tag in task description):
    - If `VALIDATION: tier2` → Spawn build-validator only (Haiku)
    - If `VALIDATION: tier3` → Spawn both build-validator + verify-app
    - If no tag → Default to tier3 validation
    `context_budget += 50 per subagent`
 
-9. **Ship:** `/commit-push-pr`
+10. **Ship:** `/commit-push-pr`
 
-### Step 5: Complete and continue
+### Step 4: Complete task
 
 1. **Update status:** status="completed_task", last_pr="[URL]", increment tasks_completed
 
@@ -910,19 +934,62 @@ bash .claude/scripts/state-lock.sh .claude/state/change-summaries.md 'cat >> .cl
 SUMMARY'
 ```
 
-6. **Self-check (every 2nd completed task):**
-   - Can you recall the files you modified and why?
-   - Are you re-reading files you already read earlier?
-   - Are your responses getting slower or less focused?
-   If degraded, go to Step 6a (proactive reset) after noting degradation.
+6. **Check reset triggers:**
+   - If `context_budget >= 8000` → go to **Phase 4 (Budget/Reset Exit)**
+   - If `tasks_completed >= 6` → go to **Phase 4 (Budget/Reset Exit)**
+   - Otherwise → go to **Phase 3 (Follow-Up Check)**
 
-7. **Check reset triggers:**
-   - If `context_budget >= 8000` → go to Step 6a (distill and reset)
-   - If `tasks_completed >= 6` → go to Step 6a (distill and reset)
-   - If self-detected degradation → go to Step 6a
-   - Otherwise → go back to Step 0 (use 3s signal timeout since next task may be queued)
+## Phase 3: After Task / Follow-Up Check
 
-### Step 6a: Pre-Reset Distillation
+### If coming from Phase 2 (just completed a task):
+
+Wait ONCE for a follow-up task assignment (15 seconds):
+```bash
+bash .claude/scripts/signal-wait.sh .claude/signals/.worker-signal 15
+TaskList()
+```
+
+Look for tasks where:
+- Description contains `ASSIGNED_TO: worker-N` (your ID)
+- Status is "pending" or "open"
+
+**If new task found:** → go back to **Phase 2, Step 2** (validate domain).
+
+**If no task found:**
+1. Distill knowledge (lightweight — domain knowledge file only, skip mistakes.md unless you hit problems):
+```bash
+domain_file=".claude/knowledge/domain/[YOUR_DOMAIN].md"
+bash .claude/scripts/state-lock.sh "$domain_file" 'cat > "$domain_file" << DOMAIN
+# Domain: [YOUR_DOMAIN]
+<!-- Updated [ISO timestamp] by worker-N. Max ~800 tokens. -->
+
+## Key Files
+[list the important files and what they do]
+
+## Gotchas & Undocumented Behavior
+[things that surprised you, race conditions, non-obvious dependencies]
+
+## Patterns That Work
+[implementation approaches that produced good results in this domain]
+
+## Testing Strategy
+[how to verify changes in this domain]
+
+## Recent State
+[current state of the code — what was just changed, what might still need work]
+DOMAIN'
+```
+2. Update worker-status.json: `status: "idle", current_task: null`
+3. Log: `[IDLE_EXIT] domain=[domain] budget=[context_budget] tasks=[tasks_completed]`
+4. **EXIT** (terminal will close — Masters will relaunch when needed)
+
+### If arriving at Phase 3 from Phase 2 Step 1 (no task on startup):
+
+1. Update worker-status.json: `status: "idle"`
+2. Log: `[NO_TASK_EXIT] worker-N found no assigned task`
+3. **EXIT** (terminal will close — Masters will relaunch when needed)
+
+## Phase 4: Budget/Reset Exit
 
 **This is the most important step. You have rich context you're about to lose.**
 
@@ -968,45 +1035,36 @@ MISTAKE'
 echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [worker-N] [DISTILL] domain=[domain] budget=[context_budget] tasks=[tasks_completed]" >> .claude/logs/activity.log
 ```
 
-4. **Reset:**
-- Update worker-status.json: `status: "resetting", tasks_completed: 0, domain: null, context_budget: 0`
-- `/clear`
-- `/worker-loop`
-
-### Step 7: If no task found
-```bash
-# Adaptive: use shorter timeout if you just completed something
-bash .claude/scripts/signal-wait.sh .claude/signals/.worker-signal 10
-```
-Go back to Step 0.
+4. **Reset status and EXIT:**
+- Update worker-status.json: `status: "idle", tasks_completed: 0, domain: null, context_budget: 0`
+- **EXIT** (terminal will close — Masters will relaunch when needed)
 
 ## Domain Rules Summary
 - ONE domain, set by first task
 - ONLY work on tasks in your domain
 - Fix tasks for your work come back to YOU
 
-## Self-Check (Restored from v7)
+## Self-Check
 
 After every 2nd completed task, check your own context health:
 - Can you recall the files you modified and why?
 - Are you re-reading files you already read earlier in this session?
 - Are your responses getting slower or less focused?
 
-If you notice degradation, finish your current task and then proactively reset — don't wait for the budget threshold. Proactive resets are always better than degraded output.
+If you notice degradation, finish your current task and then go to Phase 4 (Budget/Reset Exit) — don't wait for the budget threshold. Proactive resets are always better than degraded output.
 
-## Emergency Commands (Restored from v7)
+## Emergency Commands
 
 If something goes wrong:
-- `/clear` then `/worker-loop` — Full context reset and restart
-- Manually update worker-status.json to reset your state
-- If stuck in a loop: update status to "idle", clear current_task, then `/clear` → `/worker-loop`
-- If task is impossible: mark task as blocked with a note, go back to polling
+- Update worker-status.json to `status: "idle"`, then **EXIT**
+- If task is impossible: mark task as blocked with a note, set "idle", **EXIT**
 
 ## What You Do NOT Do
 - Read/modify other workers' status entries
 - Write to task-queue.json or handoff.json
 - Communicate with the user
 - Decompose or route tasks
+- Run in an infinite loop — you EXIT when idle
 
 
 # ==============================================================================
@@ -1097,6 +1155,55 @@ cat package.json 2>/dev/null || cat pyproject.toml 2>/dev/null || cat Cargo.toml
 cat tsconfig.json 2>/dev/null | head -30 || true
 ```
 
+**2e. Detect launch commands (how to run the project):**
+```bash
+# Extract runnable commands from project config files
+# package.json scripts (most common)
+node -e "
+  try {
+    const pkg = require('./package.json');
+    const scripts = pkg.scripts || {};
+    const priority = ['dev','start','serve','build','test','lint','preview','storybook'];
+    const results = [];
+    for (const [name, cmd] of Object.entries(scripts)) {
+      const cat = name.match(/dev|serve|start|preview|storybook/) ? 'dev'
+        : name.match(/build|compile/) ? 'build'
+        : name.match(/test|spec|e2e|cypress/) ? 'test'
+        : name.match(/lint|format|check/) ? 'lint' : 'run';
+      results.push({name: name, command: 'npm run ' + name, source: 'package.json', category: cat});
+    }
+    console.log(JSON.stringify(results));
+  } catch(e) { console.log('[]'); }
+" 2>/dev/null || echo '[]'
+
+# Makefile targets
+if [ -f Makefile ]; then
+  grep -E '^[a-zA-Z_-]+:' Makefile | sed 's/:.*//' | head -10
+fi
+
+# docker-compose
+if [ -f docker-compose.yml ] || [ -f docker-compose.yaml ]; then
+  echo '{"name":"Docker Compose Up","command":"docker-compose up","source":"docker-compose.yml","category":"docker"}'
+fi
+
+# Python entry points
+ls manage.py app.py main.py run.py 2>/dev/null
+
+# Cargo.toml (Rust)
+if [ -f Cargo.toml ]; then
+  echo '{"name":"Cargo Run","command":"cargo run","source":"Cargo.toml","category":"run"}'
+  echo '{"name":"Cargo Test","command":"cargo test","source":"Cargo.toml","category":"test"}'
+fi
+
+# go.mod (Go)
+if [ -f go.mod ]; then
+  echo '{"name":"Go Run","command":"go run .","source":"go.mod","category":"run"}'
+  echo '{"name":"Go Test","command":"go test ./...","source":"go.mod","category":"test"}'
+fi
+```
+
+Save detected commands for Step 4 — you will include them in `codebase-map.json` as `"launch_commands"`.
+
 **After Pass 1, STOP and build a draft domain map.** You should now know:
 - The top-level directory structure → candidate domains
 - Which files are large/complex → where deep reads matter
@@ -1169,6 +1276,9 @@ bash .claude/scripts/state-lock.sh .claude/state/codebase-map.json 'cat > .claud
 {
   "scanned_at": "[ISO timestamp]",
   "scan_type": "full_2pass",
+  "launch_commands": [
+    { "name": "[friendly name]", "command": "[shell command]", "source": "[config file]", "category": "dev|build|test|run|docker|lint" }
+  ],
   "domains": {
     "[domain-name]": {
       "path": "[directory path]",
@@ -1191,6 +1301,16 @@ bash .claude/scripts/state-lock.sh .claude/state/codebase-map.json 'cat > .claud
 MAP'
 ```
 
+### Step 4b: Write launch commands to handoff.json
+
+If launch commands were detected, write them to `handoff.json` so Master-1 can inform the user:
+```bash
+# Only if launch_commands were detected
+if [ "$(jq '.launch_commands | length' .claude/state/codebase-map.json 2>/dev/null)" -gt 0 ]; then
+  bash .claude/scripts/state-lock.sh .claude/state/handoff.json 'jq ". + {launch_commands: $(jq '.launch_commands' .claude/state/codebase-map.json)}" .claude/state/handoff.json > /tmp/ho.json && mv /tmp/ho.json .claude/state/handoff.json'
+fi
+```
+
 ### Step 5: Update codebase-insights.md
 
 Write/update insights (additive — don't overwrite existing insights that are still valid). Stay under the ~2000 token budget.
@@ -1211,6 +1331,11 @@ cat .claude/knowledge/codebase-insights.md
 
 ```bash
 bash .claude/scripts/state-lock.sh .claude/state/agent-health.json 'jq ".\"master-2\".status = \"active\" | .\"master-2\".tier1_count = 0 | .\"master-2\".decomposition_count = 0" .claude/state/agent-health.json > /tmp/ah.json && mv /tmp/ah.json .claude/state/agent-health.json'
+```
+
+**Log scan completion** (the GUI watches for this signal):
+```bash
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [master-2] [SCAN_COMPLETE] domains=[D] files=[M] coupling_hotspots=[K]" >> .claude/logs/activity.log
 ```
 
 ### Step 7: Confirm and auto-start architect loop
@@ -1242,6 +1367,7 @@ You are **Master-3: Allocator** running on **Sonnet**.
 cat .claude/docs/master-3-role.md
 cat .claude/knowledge/allocation-learnings.md
 cat .claude/knowledge/codebase-insights.md
+cat .claude/knowledge/instruction-patches.md
 ```
 
 ## First Message
@@ -1330,6 +1456,11 @@ You do NOT need to understand implementations. You need to know: "this task touc
 ### Step 4: Update agent-health.json
 ```bash
 bash .claude/scripts/state-lock.sh .claude/state/agent-health.json 'jq ".\"master-3\".status = \"active\" | .\"master-3\".context_budget = 0 | .\"master-3\".started_at = \"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'\"" .claude/state/agent-health.json > /tmp/ah.json && mv /tmp/ah.json .claude/state/agent-health.json'
+```
+
+**Log scan completion** (the GUI watches for this signal):
+```bash
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [master-3] [SCAN_COMPLETE] domains=[D] routing_knowledge=loaded" >> .claude/logs/activity.log
 ```
 
 ### Step 5: Start allocate loop

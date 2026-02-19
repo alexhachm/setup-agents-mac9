@@ -703,11 +703,12 @@ function Get-AgentBanner([hashtable]$Agent, [bool]$ContinueMode) {
 
 function Get-WslClaudeCommand([hashtable]$Agent, [bool]$ContinueMode) {
     $cwdWsl = Escape-BashSingleQuoted (Convert-ToWslPath $Agent.cwd)
+    $teamEnv = if ($Agent.id -eq "master-1") { "" } else { "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 " }
     if ($ContinueMode) {
-        return "cd '$cwdWsl' && exec claude --continue --model $($Agent.model) --dangerously-skip-permissions"
+        return "cd '$cwdWsl' && exec ${teamEnv}claude --continue --model $($Agent.model) --dangerously-skip-permissions"
     }
     $slashCmd = Escape-BashSingleQuoted $Agent.fresh_slash
-    return "cd '$cwdWsl' && exec claude --model $($Agent.model) --dangerously-skip-permissions '$slashCmd'"
+    return "cd '$cwdWsl' && exec ${teamEnv}claude --model $($Agent.model) --dangerously-skip-permissions '$slashCmd'"
 }
 
 function Write-WslLauncherPair([hashtable]$Agent, [bool]$ContinueMode) {

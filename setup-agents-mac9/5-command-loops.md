@@ -477,11 +477,12 @@ If `commits_since >= 20` or changes span >50% of domains: full reset (Step 7).
 
 Adaptive signal timeout based on activity:
 ```bash
-# If you just processed a request → shorter timeout (stay responsive)
-# If nothing happened → longer timeout (save resources)
-bash .claude/scripts/signal-wait.sh .claude/signals/.handoff-signal 15
+# Signal-first, watchdog-second:
+# - Fast enough when active to stay responsive
+# - Slower fallback when idle to reduce background churn
+bash .claude/scripts/signal-wait.sh .claude/signals/.handoff-signal 25
 ```
-Use 5s timeout if `last_activity` was < 30s ago. Use 15s otherwise.
+Use 10s timeout if `last_activity` was < 30s ago. Use 25s otherwise.
 
 Go back to Step 1.
 
@@ -551,7 +552,7 @@ Monitoring for:
 • Task completion for integration
 
 Using signal-based waking (instant response).
-Adaptive polling: 3s when active, 10s when idle.
+Adaptive fallback polling: 6s when active, 20s when idle.
 ```
 
 Update agent-health.json:
@@ -567,15 +568,16 @@ Then begin the loop.
 
 ### Step 1: Wait for signals (adaptive timeout)
 ```bash
-# Adaptive: 3s when active (just processed something), 10s when idle
-# This restores v7's adaptive polling adapted to the signal framework
-bash .claude/scripts/signal-wait.sh .claude/signals/.task-signal 10 &
-bash .claude/scripts/signal-wait.sh .claude/signals/.fix-signal 10 &
-bash .claude/scripts/signal-wait.sh .claude/signals/.completion-signal 10 &
+# Signal-first, watchdog-second:
+# - Wait on signals directly
+# - Use slower idle fallback to reduce CPU churn
+bash .claude/scripts/signal-wait.sh .claude/signals/.task-signal 20 &
+bash .claude/scripts/signal-wait.sh .claude/signals/.fix-signal 20 &
+bash .claude/scripts/signal-wait.sh .claude/signals/.completion-signal 20 &
 wait -n 2>/dev/null || true
 ```
 
-Use 3s timeout if `last_activity` was < 30s ago. Use 10s otherwise.
+Use 6s timeout if `last_activity` was < 30s ago. Use 20s otherwise.
 
 `polling_cycle += 1`
 

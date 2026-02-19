@@ -2,6 +2,12 @@
 // WITH EXTENSIVE DEBUG LOGGING
 'use strict';
 
+// Suppress EPIPE errors on stdout/stderr — these occur when the pipe
+// is closed (e.g. parent process exits) and console.log writes are
+// buffered, causing async errors that bypass synchronous try/catch.
+process.stdout?.on('error', (err) => { if (err.code !== 'EPIPE') throw err; });
+process.stderr?.on('error', (err) => { if (err.code !== 'EPIPE') throw err; });
+
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
@@ -84,6 +90,45 @@ if (projectArg && fs.existsSync(path.join(projectArg, '.claude-shared-state'))) 
 
 const getStatePath = (file) => projectPath ? path.join(projectPath, '.claude-shared-state', file) : null;
 const getLogPath = () => projectPath ? path.join(projectPath, '.claude', 'logs', 'activity.log') : null;
+const getSignalPath = (signalFile) => projectPath ? path.join(projectPath, '.claude', 'signals', signalFile) : null;
+
+function writeJsonFileAtomic(filePath, data) {
+    const dir = path.dirname(filePath);
+    fs.mkdirSync(dir, { recursive: true });
+
+    const tmpPath = `${filePath}.tmp.${process.pid}.${Date.now()}`;
+    try {
+        fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2));
+        fs.renameSync(tmpPath, filePath);
+    } finally {
+        if (fs.existsSync(tmpPath)) {
+            try { fs.unlinkSync(tmpPath); } catch (e) { /* ignore cleanup errors */ }
+        }
+    }
+}
+
+function touchSignal(signalName) {
+    if (!projectPath) {
+        throw new Error('No project selected');
+    }
+    if (typeof signalName !== 'string' || !signalName.trim()) {
+        throw new Error('Signal name is required');
+    }
+
+    // Keep signal naming consistent with existing dot-prefixed files.
+    const trimmed = signalName.trim();
+    const normalized = trimmed.startsWith('.') ? trimmed : `.${trimmed}`;
+    const signalPath = getSignalPath(normalized);
+    if (!signalPath) {
+        throw new Error('Signal path unavailable');
+    }
+
+    fs.mkdirSync(path.dirname(signalPath), { recursive: true });
+    const now = new Date();
+    fs.closeSync(fs.openSync(signalPath, 'a'));
+    fs.utimesSync(signalPath, now, now);
+    return { signalPath, signalName: normalized };
+}
 
 function createWindow() {
     debug('WINDOW', 'Creating main window');
@@ -139,17 +184,20 @@ ipcMain.handle('select-project', async () => {
 
     if (!result.canceled && result.filePaths.length > 0) {
         const selectedPath = result.filePaths[0];
-        const statePath = path.join(selectedPath, '.claude-shared-state');
+        projectPath = selectedPath;
+        addProjectToRecent(selectedPath);
+        debug('IPC', 'Project selected', { projectPath });
 
-        if (fs.existsSync(statePath)) {
-            projectPath = selectedPath;
-            debug('IPC', 'Project selected successfully', { projectPath });
+        const hasSharedState = fs.existsSync(path.join(selectedPath, '.claude-shared-state'));
+        if (hasSharedState) {
             startWatching();
-            return { success: true, path: selectedPath };
-        } else {
-            debug('IPC', 'Missing .claude-shared-state directory', { selectedPath });
-            return { success: false, error: 'Missing .claude-shared-state directory' };
         }
+
+        return {
+            success: true,
+            path: selectedPath,
+            needsSetup: !hasSharedState
+        };
     }
     return { success: false, error: 'No directory selected' };
 });
@@ -206,11 +254,23 @@ ipcMain.handle('write-state', async (event, { filename, data }) => {
         return { success: false, error: 'No project selected' };
     }
     try {
-        fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
+        writeJsonFileAtomic(filePath, data);
         debug('IPC', 'write-state success', { filename });
         return { success: true };
     } catch (e) {
         debug('IPC', 'write-state error', { filename, error: e.message });
+        return { success: false, error: e.message };
+    }
+});
+
+ipcMain.handle('touch-signal', async (event, signalName) => {
+    debug('IPC', 'touch-signal called', { signalName });
+    try {
+        const result = touchSignal(signalName);
+        debug('IPC', 'touch-signal success', result);
+        return { success: true, ...result };
+    } catch (e) {
+        debug('IPC', 'touch-signal error', { signalName, error: e.message });
         return { success: false, error: e.message };
     }
 });
@@ -442,6 +502,76 @@ const launchedProcesses = new Map(); // key: "projectPath:agentId"
 // Track multiple projects
 let projects = new Map(); // path -> { name, path, addedAt }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// PERSISTENT RECENT PROJECTS
+// ═══════════════════════════════════════════════════════════════════════════
+const recentProjectsFile = path.join(os.homedir(), '.claude-agent-recent-projects.json');
+
+function loadRecentProjectsFromDisk() {
+    try {
+        if (fs.existsSync(recentProjectsFile)) {
+            const data = JSON.parse(fs.readFileSync(recentProjectsFile, 'utf-8'));
+            if (Array.isArray(data)) {
+                data.forEach(p => {
+                    if (p.path && fs.existsSync(p.path)) {
+                        projects.set(p.path, {
+                            name: p.name || path.basename(p.path),
+                            path: p.path,
+                            repoUrl: p.repoUrl || null,
+                            addedAt: p.addedAt || new Date().toISOString()
+                        });
+                    }
+                });
+                debug('PROJECTS', 'Loaded recent projects from disk', { count: projects.size });
+            }
+        }
+    } catch (e) {
+        debug('PROJECTS', 'Error loading recent projects', { error: e.message });
+    }
+}
+
+function saveRecentProjectsToDisk() {
+    try {
+        const data = Array.from(projects.values()).map(p => ({
+            name: p.name,
+            path: p.path,
+            repoUrl: p.repoUrl || null,
+            addedAt: p.addedAt
+        }));
+        fs.writeFileSync(recentProjectsFile, JSON.stringify(data, null, 2));
+        debug('PROJECTS', 'Saved recent projects to disk', { count: data.length });
+    } catch (e) {
+        debug('PROJECTS', 'Error saving recent projects', { error: e.message });
+    }
+}
+
+function detectRepoUrl(pp) {
+    try {
+        const gitConfigPath = path.join(pp, '.git', 'config');
+        if (fs.existsSync(gitConfigPath)) {
+            const content = fs.readFileSync(gitConfigPath, 'utf-8');
+            const match = content.match(/\[remote "origin"\][^[]*url\s*=\s*(.+)/m);
+            if (match) return match[1].trim();
+        }
+    } catch (e) { /* ignore */ }
+    return null;
+}
+
+function addProjectToRecent(pp, repoUrl) {
+    const name = path.basename(pp);
+    const url = repoUrl || detectRepoUrl(pp) || null;
+    projects.set(pp, {
+        name,
+        path: pp,
+        repoUrl: url,
+        addedAt: projects.get(pp)?.addedAt || new Date().toISOString()
+    });
+    saveRecentProjectsToDisk();
+}
+
+// Load persisted recent projects on startup
+loadRecentProjectsFromDisk();
+
 ipcMain.handle('get-launcher-manifest', async (event, forProjectPath) => {
     const pp = forProjectPath || projectPath;
     debug('IPC', 'get-launcher-manifest called', { forProjectPath, projectPath, pp });
@@ -470,7 +600,7 @@ ipcMain.handle('launch-agent', async (event, { agentId, projectPath: pp, continu
     try {
         manifest = readManifest(manifestPath);
     } catch (e) {
-        return { success: false, error: 'Launcher manifest not found. Run setup.sh first.' };
+        return { success: false, error: 'Launcher manifest not found. Run setup first (setup.ps1 on Windows).' };
     }
 
     const agent = manifest.agents.find(a => a.id === agentId);
@@ -648,11 +778,18 @@ ipcMain.handle('launch-group-tabbed-wt', async (event, { group, projectPath: pp,
     const tabArgs = agents.map((agent, i) => {
         const launcherDir = path.join(pp, '.claude', 'launchers');
         const suffix = continueMode ? '-continue' : '';
-        const ps1File = path.join(launcherDir, `${agent.id}${suffix}.ps1`);
+        const defaultPs1 = path.join(launcherDir, `${agent.id}${suffix}.ps1`);
+        const defaultBat = path.join(launcherDir, `${agent.id}${suffix}.bat`);
+        const ps1Field = continueMode ? (agent.launcher_ps1_continue || agent.launcher_ps1) : agent.launcher_ps1;
+        const batField = continueMode ? (agent.launcher_win_continue || agent.launcher_win) : agent.launcher_win;
+        const ps1File = resolveManifestPath(pp, ps1Field, defaultPs1);
+        const batFile = resolveManifestPath(pp, batField, defaultBat);
         const prefix = i === 0 ? '' : '; new-tab';
 
         if (fs.existsSync(ps1File)) {
             return `${prefix} -d "${agent.cwd}" --title ${agent.id} powershell.exe -ExecutionPolicy Bypass -File "${ps1File}"`;
+        } else if (fs.existsSync(batFile)) {
+            return `${prefix} -d "${agent.cwd}" --title ${agent.id} cmd /k "${batFile}"`;
         } else {
             const cmd = continueMode ? agent.command_continue : agent.command_fresh;
             const winCmd = cmd.replace(/'/g, '"');
@@ -692,15 +829,21 @@ ipcMain.handle('launch-all-tabbed-wt', async (event, { projectPath: pp, continue
     const agents = manifest.agents;
     if (agents.length === 0) return { success: false, error: 'No agents in manifest' };
 
-    const launcherDir = path.join(pp, '.claude', 'launchers');
-    const suffix = continueMode ? '-continue' : '';
-
     const tabArgs = agents.map((agent, i) => {
-        const ps1File = path.join(launcherDir, `${agent.id}${suffix}.ps1`);
+        const launcherDir = path.join(pp, '.claude', 'launchers');
+        const suffix = continueMode ? '-continue' : '';
+        const defaultPs1 = path.join(launcherDir, `${agent.id}${suffix}.ps1`);
+        const defaultBat = path.join(launcherDir, `${agent.id}${suffix}.bat`);
+        const ps1Field = continueMode ? (agent.launcher_ps1_continue || agent.launcher_ps1) : agent.launcher_ps1;
+        const batField = continueMode ? (agent.launcher_win_continue || agent.launcher_win) : agent.launcher_win;
+        const ps1File = resolveManifestPath(pp, ps1Field, defaultPs1);
+        const batFile = resolveManifestPath(pp, batField, defaultBat);
         const prefix = i === 0 ? '' : '; new-tab';
 
         if (fs.existsSync(ps1File)) {
             return `${prefix} -d "${agent.cwd}" --title ${agent.id} powershell.exe -ExecutionPolicy Bypass -File "${ps1File}"`;
+        } else if (fs.existsSync(batFile)) {
+            return `${prefix} -d "${agent.cwd}" --title ${agent.id} cmd /k "${batFile}"`;
         } else {
             const cmd = continueMode ? agent.command_continue : agent.command_fresh;
             const winCmd = cmd.replace(/'/g, '"');
@@ -774,6 +917,33 @@ ipcMain.handle('get-launched-agents', async () => {
     }));
 });
 
+// === Project Setup Status Check ===
+
+ipcMain.handle('check-project-setup', async (event, pp) => {
+    pp = pp || projectPath;
+    if (!pp) return { needsSetup: true, reason: 'No project selected' };
+
+    const checks = {
+        projectExists: fs.existsSync(pp),
+        hasClaudeDir: fs.existsSync(path.join(pp, '.claude')),
+        hasSharedState: fs.existsSync(path.join(pp, '.claude-shared-state')),
+        hasManifest: fs.existsSync(path.join(pp, '.claude', 'launchers', 'manifest.json')),
+        hasState: fs.existsSync(path.join(pp, '.claude', 'state')),
+        hasClaude_md: fs.existsSync(path.join(pp, 'CLAUDE.md')),
+    };
+
+    const needsSetup = !checks.hasClaudeDir || !checks.hasSharedState || !checks.hasManifest;
+    const missing = [];
+    if (!checks.hasClaudeDir) missing.push('.claude directory');
+    if (!checks.hasSharedState) missing.push('.claude-shared-state directory');
+    if (!checks.hasManifest) missing.push('launcher manifest');
+    if (!checks.hasState) missing.push('state files');
+    if (!checks.hasClaude_md) missing.push('CLAUDE.md');
+
+    debug('SETUP', 'Project setup check', { pp, checks, needsSetup });
+    return { needsSetup, checks, missing, path: pp };
+});
+
 // === Multi-Project Management ===
 
 ipcMain.handle('add-project', async (event, pp) => {
@@ -788,35 +958,42 @@ ipcMain.handle('add-project', async (event, pp) => {
         pp = result.filePaths[0];
     }
 
-    const statePath = path.join(pp, '.claude-shared-state');
-    if (!fs.existsSync(statePath)) {
-        return { success: false, error: 'Not a multi-agent project (missing .claude-shared-state)' };
+    if (!fs.existsSync(pp)) {
+        return { success: false, error: 'Directory does not exist' };
     }
 
+    addProjectToRecent(pp);
     const name = path.basename(pp);
-    projects.set(pp, { name, path: pp, addedAt: new Date().toISOString() });
+    const hasSharedState = fs.existsSync(path.join(pp, '.claude-shared-state'));
 
     // Set as active project if first one
     if (!projectPath) {
         projectPath = pp;
-        startWatching();
+        if (hasSharedState) {
+            startWatching();
+        }
     }
 
-    debug('PROJECT', 'Added project', { path: pp, name });
-    return { success: true, path: pp, name };
+    debug('PROJECT', 'Added project', { path: pp, name, hasSharedState });
+    return { success: true, path: pp, name, needsSetup: !hasSharedState };
 });
 
 ipcMain.handle('switch-project', async (event, pp) => {
-    if (!projects.has(pp) && !fs.existsSync(path.join(pp, '.claude-shared-state'))) {
-        return { success: false, error: 'Invalid project path' };
+    if (!fs.existsSync(pp)) {
+        return { success: false, error: 'Project directory does not exist' };
     }
 
     stopWatching();
     projectPath = pp;
-    startWatching();
+    addProjectToRecent(pp);
 
-    debug('PROJECT', 'Switched to project', { path: pp });
-    return { success: true, path: pp };
+    const hasSharedState = fs.existsSync(path.join(pp, '.claude-shared-state'));
+    if (hasSharedState) {
+        startWatching();
+    }
+
+    debug('PROJECT', 'Switched to project', { path: pp, hasSharedState });
+    return { success: true, path: pp, needsSetup: !hasSharedState };
 });
 
 ipcMain.handle('list-projects', async () => {
@@ -833,6 +1010,7 @@ ipcMain.handle('list-projects', async () => {
 
 ipcMain.handle('remove-project', async (event, pp) => {
     projects.delete(pp);
+    saveRecentProjectsToDisk();
     if (projectPath === pp) {
         stopWatching();
         // Switch to next available project or clear
@@ -1071,9 +1249,27 @@ ipcMain.handle('run-setup', async (event, { repoUrl, projectPath: pp, workers, s
 });
 
 ipcMain.handle('get-recent-projects', async () => {
-    const configFile = path.join(os.homedir(), '.claude-multi-agent-config');
     const recent = [];
+    const seenPaths = new Set();
 
+    // 1. Include all projects from the persistent recent projects map
+    for (const [pp, info] of projects) {
+        if (!fs.existsSync(pp)) continue;
+        seenPaths.add(pp);
+        const hasManifest = fs.existsSync(
+            path.join(pp, '.claude', 'launchers', 'manifest.json')
+        );
+        recent.push({
+            name: info.name || path.basename(pp),
+            path: pp,
+            repoUrl: info.repoUrl || null,
+            hasManifest,
+            isActive: pp === projectPath
+        });
+    }
+
+    // 2. Also check the legacy config file for any project not already tracked
+    const configFile = path.join(os.homedir(), '.claude-multi-agent-config');
     try {
         if (fs.existsSync(configFile)) {
             const content = fs.readFileSync(configFile, 'utf-8');
@@ -1086,7 +1282,7 @@ ipcMain.handle('get-recent-projects', async () => {
                 }
             });
 
-            if (config.project_path && fs.existsSync(config.project_path)) {
+            if (config.project_path && fs.existsSync(config.project_path) && !seenPaths.has(config.project_path)) {
                 const hasManifest = fs.existsSync(
                     path.join(config.project_path, '.claude', 'launchers', 'manifest.json')
                 );
@@ -1097,26 +1293,12 @@ ipcMain.handle('get-recent-projects', async () => {
                     hasManifest,
                     isActive: config.project_path === projectPath
                 });
+                // Migrate legacy project into persistent store
+                addProjectToRecent(config.project_path, config.repo_url || null);
             }
         }
     } catch (e) {
-        debug('PROJECTS', 'Error reading config', { error: e.message });
-    }
-
-    // Also check the projects Map for any added via GUI
-    for (const [pp, info] of projects) {
-        if (!recent.find(r => r.path === pp)) {
-            const hasManifest = fs.existsSync(
-                path.join(pp, '.claude', 'launchers', 'manifest.json')
-            );
-            recent.push({
-                name: info.name || path.basename(pp),
-                path: pp,
-                repoUrl: null,
-                hasManifest,
-                isActive: pp === projectPath
-            });
-        }
+        debug('PROJECTS', 'Error reading legacy config', { error: e.message });
     }
 
     return recent;
@@ -1141,6 +1323,7 @@ app.whenReady().then(() => {
 
     // Auto-start watching if project was passed
     if (projectPath) {
+        addProjectToRecent(projectPath);
         debug('LIFECYCLE', 'Auto-starting watchers for project', { projectPath });
         startWatching();
     }

@@ -6,6 +6,12 @@
 // ═══════════════════════════════════════════════════════════════════════════
 const DEBUG_LOG = [];
 const MAX_DEBUG = 500;
+const DEBUG_RENDERER = localStorage.getItem('acc-debug') === '1' || window.location.search.includes('debug=1');
+const IS_MAC = navigator.platform === 'MacIntel' || navigator.userAgent.includes('Mac');
+const HEALTH_POLL_MS_NORMAL = IS_MAC ? 12000 : 6000;
+const HEALTH_POLL_MS_URGENT = IS_MAC ? 6000 : 3000;
+const SIGNAL_AGE_REFRESH_MS = IS_MAC ? 3000 : 1000;
+const WATCHDOG_REFRESH_MS = IS_MAC ? 30000 : 20000;
 const PHASE_COLORS = {
     handoff: '#6e7681', triage: '#a371f7', decomposition: '#8b5cf6',
     allocation: '#d29922', worker: '#58a6ff', validation: '#79c0ff', integration: '#3fb950'
@@ -25,7 +31,9 @@ function debugLog(category, message, data = null) {
     };
     DEBUG_LOG.push(entry);
     if (DEBUG_LOG.length > MAX_DEBUG) DEBUG_LOG.splice(0, DEBUG_LOG.length - MAX_DEBUG);
-    console.log(`[${category}] ${message}`, data || '');
+    if (DEBUG_RENDERER) {
+        console.log(`[${category}] ${message}`, data || '');
+    }
     if (elements.debugPanel && !elements.debugPanel.classList.contains('hidden')) appendDebugEntry(entry);
 }
 function appendDebugEntry(entry) {
@@ -133,6 +141,9 @@ function setupEventListeners() {
     elements.selectProjectBtn?.addEventListener('click', selectProject);
     elements.addProjectBtn?.addEventListener('click', () => {
         // Navigate back to setup screen to add a new project
+        stopWatchdogPolling();
+        stopHealthPolling();
+        stopSignalAgeUpdater();
         elements.dashboardScreen.classList.remove('active');
         elements.connectionScreen.classList.add('active');
         loadRecentProjects();
@@ -241,13 +252,14 @@ function switchTab(tabName) {
 
     // Load data for newly active tab
     if (tabName === 'timeline') populateRequestDropdown();
-    else if (tabName === 'health') { loadAgentHealth(); startHealthPolling(); }
+    else if (tabName === 'health') startHealthPolling();
     else if (tabName === 'knowledge') loadKnowledge();
     else if (tabName === 'signals') loadSignals();
     else if (tabName === 'stats') computeSessionStats();
     else if (tabName === 'launch') loadLaunchPanel();
 
     if (tabName !== 'health') stopHealthPolling();
+    if (tabName !== 'signals') stopSignalAgeUpdater();
 }
 
 async function checkConnection() {
@@ -279,6 +291,7 @@ function showDashboard() {
     elements.connectionScreen.classList.remove('active');
     elements.dashboardScreen.classList.add('active');
     renderProjectTabs();
+    startWatchdogPolling();
 }
 
 async function renderProjectTabs() {
@@ -638,6 +651,61 @@ async function checkAgentHealthScanStatus() {
     }
 }
 
+function buildRequestId(text) {
+    const stem = text
+        .toLowerCase()
+        .replace(/[^a-z0-9\s-]/g, ' ')
+        .split(/\s+/)
+        .filter(w => w.length > 2)
+        .slice(0, 4)
+        .join('-')
+        .replace(/-+/g, '-')
+        .replace(/^-|-$/g, '');
+    return stem || `request-${Date.now()}`;
+}
+
+async function emitSignal(signalName) {
+    const result = await window.electron.touchSignal(signalName);
+    if (!result?.success) {
+        throw new Error(result?.error || `Failed to emit signal: ${signalName}`);
+    }
+}
+
+let watchdogTimer = null;
+async function refreshWatchdogState() {
+    if (document.hidden || !state.projectName) return;
+    try {
+        const [workers, taskQueue, handoff, clarifications, fixQueue] = await Promise.all([
+            window.electron.getState('worker-status.json'),
+            window.electron.getState('task-queue.json'),
+            window.electron.getState('handoff.json'),
+            window.electron.getState('clarification-queue.json'),
+            window.electron.getState('fix-queue.json')
+        ]);
+
+        state.workers = workers || {};
+        state.taskQueue = taskQueue;
+        state.handoff = handoff;
+        state.clarifications = clarifications || { questions: [], responses: [] };
+        state.fixQueue = fixQueue;
+        renderAll();
+    } catch (e) {
+        debugLog('WATCHDOG', 'Error refreshing fallback state', { error: e.message });
+    }
+}
+
+function startWatchdogPolling() {
+    stopWatchdogPolling();
+    watchdogTimer = setInterval(refreshWatchdogState, WATCHDOG_REFRESH_MS);
+}
+
+function stopWatchdogPolling() {
+    if (watchdogTimer) {
+        clearInterval(watchdogTimer);
+        watchdogTimer = null;
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // COMMAND INPUT
 // ═══════════════════════════════════════════════════════════════════════════
@@ -670,13 +738,17 @@ async function sendCommand() {
                         request_id: `fix-${Date.now()}`
                     }
                 });
+                await emitSignal('.fix-signal');
+            } else {
+                debugLog('CMD', 'Fix command ignored: invalid format', { text });
             }
         } else {
-            const requestId = text.toLowerCase().split(/\s+/).filter(w => w.length > 2).slice(0, 3).join('-') || `request-${Date.now()}`;
+            const requestId = buildRequestId(text);
             await window.electron.writeState('handoff.json', {
                 request_id: requestId, timestamp: new Date().toISOString(),
                 type: 'feature', description: text, tasks: [], success_criteria: [], status: 'pending_decomposition'
             });
+            await emitSignal('.handoff-signal');
         }
     } catch (e) { debugLog('CMD', 'Error', { error: e.message }); }
     elements.sendBtn.disabled = false;
@@ -1034,8 +1106,38 @@ function renderTimelineChart(phases, events) {
 // FEATURE 2: AGENT HEALTH DASHBOARD
 // ═══════════════════════════════════════════════════════════════════════════
 let healthPollTimer = null;
-function startHealthPolling() { stopHealthPolling(); healthPollTimer = setInterval(loadAgentHealth, 3000); }
-function stopHealthPolling() { if (healthPollTimer) { clearInterval(healthPollTimer); healthPollTimer = null; } }
+function hasUrgentHealthState(health) {
+    if (!health) return false;
+    if (health['master-2']?.status === 'resetting' || health['master-3']?.status === 'resetting') return true;
+    const workers = Object.values(health.workers || {});
+    return workers.some(w => w.status === 'dead' || w.status === 'resetting');
+}
+
+function nextHealthPollIntervalMs() {
+    return hasUrgentHealthState(state.agentHealth) ? HEALTH_POLL_MS_URGENT : HEALTH_POLL_MS_NORMAL;
+}
+
+async function runHealthPollLoop() {
+    try {
+        await loadAgentHealth();
+    } catch (e) {
+        debugLog('HEALTH', 'Health poll error', { error: e.message });
+    }
+    if (state.activeTab !== 'health') return;
+    healthPollTimer = setTimeout(runHealthPollLoop, nextHealthPollIntervalMs());
+}
+
+function startHealthPolling() {
+    stopHealthPolling();
+    runHealthPollLoop();
+}
+
+function stopHealthPolling() {
+    if (healthPollTimer) {
+        clearTimeout(healthPollTimer);
+        healthPollTimer = null;
+    }
+}
 
 async function loadAgentHealth() {
     const health = await window.electron.getAgentHealth();
@@ -1231,8 +1333,8 @@ function renderSignalHistory() {
 function checkSlowWake(signalData) {
     const signalTime = new Date(signalData.timestamp).getTime();
     const recentActions = state.activityLog.filter(e => {
-        const eTime = new Date().getTime(); // approximate
-        return Math.abs(eTime - signalTime) < 10000;
+        if (!Number.isFinite(e.timestampMs)) return false;
+        return Math.abs(e.timestampMs - signalTime) < 10000;
     });
     // If no action within 5s of signal, mark as slow wake
     const entry = state.signalHistory.find(s => s.timestamp === signalData.timestamp);
@@ -1244,11 +1346,18 @@ function checkSlowWake(signalData) {
 
 let signalAgeTimer = null;
 function startSignalAgeUpdater() {
-    if (signalAgeTimer) clearInterval(signalAgeTimer);
+    stopSignalAgeUpdater();
     signalAgeTimer = setInterval(() => {
         if (state.activeTab === 'signals') { renderSignalPills(); renderSignalHistory(); }
-        else { clearInterval(signalAgeTimer); signalAgeTimer = null; }
-    }, 1000);
+        else stopSignalAgeUpdater();
+    }, SIGNAL_AGE_REFRESH_MS);
+}
+
+function stopSignalAgeUpdater() {
+    if (signalAgeTimer) {
+        clearInterval(signalAgeTimer);
+        signalAgeTimer = null;
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1443,7 +1552,15 @@ function parseLogLine(line) {
     const date = new Date(timestamp);
     const time = `${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`;
     const agentShort = agent.replace('master-', 'M').replace('worker-', 'W').toUpperCase();
-    return { time, agent, agentShort, action, details: details.trim() };
+    return {
+        time,
+        timestamp,
+        timestampMs: date.getTime(),
+        agent,
+        agentShort,
+        action,
+        details: details.trim()
+    };
 }
 function escapeHtml(text) { if (!text) return ''; const d = document.createElement('div'); d.textContent = text; return d.innerHTML; }
 function formatDuration(ms) {
@@ -1761,6 +1878,12 @@ window.launchProjectApp = async function (index) {
         }
     }, 5000);
 };
+
+window.addEventListener('beforeunload', () => {
+    stopHealthPolling();
+    stopSignalAgeUpdater();
+    stopWatchdogPolling();
+});
 
 // Initialize
 init();

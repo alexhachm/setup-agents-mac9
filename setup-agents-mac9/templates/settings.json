@@ -1,4 +1,5 @@
 {
+  "teammateMode": "in-process",
   "permissions": {
     "allow": [
       "Bash(*)", "Read(*)", "Write(*)", "Edit(*)", "MultiEdit(*)",

@@ -24,6 +24,26 @@ polling_cycle = 0          # For periodic health checks
 last_activity = now()      # For adaptive signal timeout
 ```
 
+## Native Agent Teams Burst Mode (Experimental, Narrow Use)
+
+Use native teammate delegation only when `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` is set.
+
+Allowed use cases:
+- Integration failures where owner/root cause is unclear across multiple worker outputs
+- Conflicting Tier 3 dependency ordering where you need a fast allocation sanity check
+- Fast read-only scan of `change-summaries.md` and activity logs before rerouting fixes
+
+Hard limits:
+- Do not use teammates for routine task allocation
+- Max 1 teammate burst per affected request
+- Teammates must not write `worker-status.json`, `task-queue.json`, `fix-queue.json`, or `handoff.json`
+- You remain the only allocator and the only merger/integration authority
+
+Logging:
+```bash
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [master-3] [TEAM_BURST] id=[request_id] purpose=\"[reason]\" teammates=[N]" >> .claude/logs/activity.log
+```
+
 ## Startup Message
 
 ```
@@ -36,7 +56,7 @@ Monitoring for:
 • Task completion for integration
 
 Using signal-based waking (instant response).
-Adaptive polling: 3s when active, 10s when idle.
+Adaptive fallback polling: 6s when active, 20s when idle.
 ```
 
 Update agent-health.json:
@@ -52,15 +72,16 @@ Then begin the loop.
 
 ### Step 1: Wait for signals (adaptive timeout)
 ```bash
-# Adaptive: 3s when active (just processed something), 10s when idle
-# This restores v7's adaptive polling adapted to the signal framework
-bash .claude/scripts/signal-wait.sh .claude/signals/.task-signal 10 &
-bash .claude/scripts/signal-wait.sh .claude/signals/.fix-signal 10 &
-bash .claude/scripts/signal-wait.sh .claude/signals/.completion-signal 10 &
+# Signal-first, watchdog-second:
+# - Wait on signals directly
+# - Use slower idle fallback to reduce CPU churn
+bash .claude/scripts/signal-wait.sh .claude/signals/.task-signal 20 &
+bash .claude/scripts/signal-wait.sh .claude/signals/.fix-signal 20 &
+bash .claude/scripts/signal-wait.sh .claude/signals/.completion-signal 20 &
 wait -n 2>/dev/null || true
 ```
 
-Use 3s timeout if `last_activity` was < 30s ago. Use 10s otherwise.
+Use 6s timeout if `last_activity` was < 30s ago. Use 20s otherwise.
 
 `polling_cycle += 1`
 
@@ -130,16 +151,17 @@ TaskList()
 
 If ALL tasks for a request_id are "completed":
 1. Read `.claude/state/change-summaries.md` for summary of all changes
-2. Pull latest, merge PRs
-3. Validation based on tier:
+2. Optional teammate burst (only when integration ownership is unclear): run read-only synthesis before merging
+3. Pull latest, merge PRs
+4. Validation based on tier:
    - Tasks tagged `VALIDATION: tier2` → spawn build-validator only
    - Tasks tagged `VALIDATION: tier3` → spawn build-validator + verify-app
-4. If issues, create fix tasks
-5. If clean, push to main
-6. Update handoff.json status to `"integrated"`
-7. Touch `.claude/signals/.handoff-signal` (so Master-2 can track)
-8. `context_budget += 100`
-9. `last_activity = now()`
+5. If issues, create fix tasks
+6. If clean, push to main
+7. Update handoff.json status to `"integrated"`
+8. Touch `.claude/signals/.handoff-signal` (so Master-2 can track)
+9. `context_budget += 100`
+10. `last_activity = now()`
 
 ### Step 6: Heartbeat check (every 3rd cycle)
 If `polling_cycle % 3 == 0`:

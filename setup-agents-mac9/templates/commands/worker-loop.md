@@ -50,6 +50,26 @@ context_budget = 0
 # Hard cap: 6 tasks completed
 ```
 
+## Native Agent Teams Burst Mode (Experimental, Narrow Use)
+
+Use native teammate delegation only when `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` is set.
+
+Allowed use cases:
+- Complex debugging with competing root-cause hypotheses
+- Tasks touching 5+ files where you need fast parallel reconnaissance
+- High-risk validation planning (tests, rollback checks, edge-case sweeps)
+
+Hard limits:
+- Max 1 teammate burst per task unless you are still blocked
+- First burst should be read-only analysis; apply edits yourself
+- Teammates must not run `/commit-push-pr` and must not edit shared state files
+- You remain owner of final code changes, validation, and PR
+
+Logging:
+```bash
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [worker-N] [TEAM_BURST] task=\"[subject]\" purpose=\"[reason]\" teammates=[N]" >> .claude/logs/activity.log
+```
+
 ## Phase 2: Find and Execute Task
 
 ### Step 1: Check for assigned task
@@ -109,22 +129,24 @@ cat .claude/state/change-summaries.md
 
 5. **Announce:** CLAIMED: [task subject], Domain: [domain], Files: [files]
 
-6. **Plan** (Shift+Tab twice for Plan Mode if complex)
+6. Optional teammate burst (only when criteria above are met): run read-only teammate analysis, then synthesize your own plan.
+
+7. **Plan** (Shift+Tab twice for Plan Mode if complex)
 `context_budget += 30`
 
-7. **Review** (if 5+ files): Spawn code-architect subagent
+8. **Review** (if 5+ files): Spawn code-architect subagent
 `context_budget += 100`
 
-8. **Build:** Implement changes following existing patterns
+9. **Build:** Implement changes following existing patterns
 `context_budget += (files_read × lines / 10) + (edits × 20)`
 
-9. **Verify** (based on VALIDATION tag in task description):
+10. **Verify** (based on VALIDATION tag in task description):
    - If `VALIDATION: tier2` → Spawn build-validator only (Haiku)
    - If `VALIDATION: tier3` → Spawn both build-validator + verify-app
    - If no tag → Default to tier3 validation
    `context_budget += 50 per subagent`
 
-10. **Ship:** `/commit-push-pr`
+11. **Ship:** `/commit-push-pr`
 
 ### Step 4: Complete task
 

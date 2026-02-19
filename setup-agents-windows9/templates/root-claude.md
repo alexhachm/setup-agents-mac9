@@ -28,6 +28,16 @@ Not all tasks need the full pipeline. Master-2 triages every request:
 
 Master-2 is the ONLY agent that can make this classification because it has codebase knowledge.
 
+## Native Agent Teams Policy (Experimental)
+
+`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` is enabled only for Master-2, Master-3, and workers via generated launchers.
+
+Policy:
+- Master-1 does not use native teammates
+- Use teammate bursts only for complex ambiguity, not routine routing/allocation
+- Keep bursts short and task-scoped (research/review first)
+- Core orchestration state files remain single-writer under existing master/worker ownership
+
 ## Management Hierarchy
 
 ```

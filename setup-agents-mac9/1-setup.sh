@@ -549,7 +549,7 @@ cat > "$launcher_dir/master-2.sh" << LAUNCHER
 clear
 printf '\\n\\033[1;45m\\033[1;37m  ████  I AM MASTER-2 — ARCHITECT (Opus)  ████  \\033[0m\\n\\n'
 cd '$project_path'
-exec claude --model opus --dangerously-skip-permissions '/scan-codebase'
+exec env CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 claude --model opus --dangerously-skip-permissions '/scan-codebase'
 LAUNCHER
 chmod +x "$launcher_dir/master-2.sh"
 
@@ -558,7 +558,7 @@ cat > "$launcher_dir/master-3.sh" << LAUNCHER
 clear
 printf '\\n\\033[1;43m\\033[1;30m  ████  I AM MASTER-3 — ALLOCATOR (Sonnet)  ████  \\033[0m\\n\\n'
 cd '$project_path'
-exec claude --model sonnet --dangerously-skip-permissions '/scan-codebase-allocator'
+exec env CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 claude --model sonnet --dangerously-skip-permissions '/scan-codebase-allocator'
 LAUNCHER
 chmod +x "$launcher_dir/master-3.sh"
 
@@ -577,7 +577,7 @@ for i in $(seq 1 $worker_count); do
 clear
 printf '\\n\\033[1;44m\\033[1;37m  ████  I AM WORKER-$i (Opus)  ████  \\033[0m\\n\\n'
 cd '$project_path/.worktrees/wt-$i'
-exec claude --model opus --dangerously-skip-permissions '/worker-loop'
+exec env CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 claude --model opus --dangerously-skip-permissions '/worker-loop'
 LAUNCHER
     chmod +x "$launcher_dir/worker-$i.sh"
 done
@@ -590,7 +590,7 @@ cat > "$launcher_dir/master-2-continue.sh" << LAUNCHER
 clear
 printf '\\n\\033[1;45m\\033[1;37m  ████  I AM MASTER-2 — ARCHITECT (Opus) [CONTINUE]  ████  \\033[0m\\n\\n'
 cd '$project_path'
-exec claude --continue --model opus --dangerously-skip-permissions
+exec env CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 claude --continue --model opus --dangerously-skip-permissions
 LAUNCHER
 chmod +x "$launcher_dir/master-2-continue.sh"
 
@@ -599,7 +599,7 @@ cat > "$launcher_dir/master-3-continue.sh" << LAUNCHER
 clear
 printf '\\n\\033[1;43m\\033[1;30m  ████  I AM MASTER-3 — ALLOCATOR (Sonnet) [CONTINUE]  ████  \\033[0m\\n\\n'
 cd '$project_path'
-exec claude --continue --model sonnet --dangerously-skip-permissions
+exec env CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 claude --continue --model sonnet --dangerously-skip-permissions
 LAUNCHER
 chmod +x "$launcher_dir/master-3-continue.sh"
 
@@ -618,7 +618,7 @@ for i in $(seq 1 $worker_count); do
 clear
 printf '\\n\\033[1;44m\\033[1;37m  ████  I AM WORKER-$i (Opus) [CONTINUE]  ████  \\033[0m\\n\\n'
 cd '$project_path/.worktrees/wt-$i'
-exec claude --continue --model opus --dangerously-skip-permissions
+exec env CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 claude --continue --model opus --dangerously-skip-permissions
 LAUNCHER
     chmod +x "$launcher_dir/worker-$i-continue.sh"
 done
@@ -652,8 +652,8 @@ cat > "$launcher_dir/manifest.json" << MANIFEST
       "cwd": "$project_path",
       "launcher": "$launcher_dir/master-2.sh",
       "launcher_continue": "$launcher_dir/master-2-continue.sh",
-      "command_fresh": "claude --model opus --dangerously-skip-permissions '/scan-codebase'",
-      "command_continue": "claude --continue --model opus --dangerously-skip-permissions"
+      "command_fresh": "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 claude --model opus --dangerously-skip-permissions '/scan-codebase'",
+      "command_continue": "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 claude --continue --model opus --dangerously-skip-permissions"
     },
     {
       "id": "master-3",
@@ -663,8 +663,8 @@ cat > "$launcher_dir/manifest.json" << MANIFEST
       "cwd": "$project_path",
       "launcher": "$launcher_dir/master-3.sh",
       "launcher_continue": "$launcher_dir/master-3-continue.sh",
-      "command_fresh": "claude --model sonnet --dangerously-skip-permissions '/scan-codebase-allocator'",
-      "command_continue": "claude --continue --model sonnet --dangerously-skip-permissions"
+      "command_fresh": "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 claude --model sonnet --dangerously-skip-permissions '/scan-codebase-allocator'",
+      "command_continue": "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 claude --continue --model sonnet --dangerously-skip-permissions"
     }$(for i in $(seq 1 $worker_count); do echo ",
     {
       \"id\": \"worker-$i\",
@@ -674,8 +674,8 @@ cat > "$launcher_dir/manifest.json" << MANIFEST
       \"cwd\": \"$project_path/.worktrees/wt-$i\",
       \"launcher\": \"$launcher_dir/worker-$i.sh\",
       \"launcher_continue\": \"$launcher_dir/worker-$i-continue.sh\",
-      \"command_fresh\": \"claude --model opus --dangerously-skip-permissions '/worker-loop'\",
-      \"command_continue\": \"claude --continue --model opus --dangerously-skip-permissions\"
+      \"command_fresh\": \"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 claude --model opus --dangerously-skip-permissions '/worker-loop'\",
+      \"command_continue\": \"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 claude --continue --model opus --dangerously-skip-permissions\"
     }"; done)
   ]
 }

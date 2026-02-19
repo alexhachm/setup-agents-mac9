@@ -25,7 +25,7 @@ let projectPath = null;
 // ═══════════════════════════════════════════════════════════════════════════
 // DEBUG LOGGING SYSTEM
 // ═══════════════════════════════════════════════════════════════════════════
-const DEBUG = true;
+const DEBUG = process.env.ACC_DEBUG === '1' || process.argv.includes('--debug-log');
 let debugLog = [];
 const MAX_DEBUG_ENTRIES = 500;
 
@@ -90,6 +90,44 @@ if (projectArg && fs.existsSync(path.join(projectArg, '.claude-shared-state'))) 
 
 const getStatePath = (file) => projectPath ? path.join(projectPath, '.claude-shared-state', file) : null;
 const getLogPath = () => projectPath ? path.join(projectPath, '.claude', 'logs', 'activity.log') : null;
+const getSignalPath = (file) => projectPath ? path.join(projectPath, '.claude', 'signals', file) : null;
+
+function writeJsonFileAtomic(filePath, data) {
+    const dir = path.dirname(filePath);
+    fs.mkdirSync(dir, { recursive: true });
+
+    const tmpPath = `${filePath}.tmp.${process.pid}.${Date.now()}`;
+    try {
+        fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2));
+        fs.renameSync(tmpPath, filePath);
+    } finally {
+        if (fs.existsSync(tmpPath)) {
+            try { fs.unlinkSync(tmpPath); } catch (e) { /* ignore cleanup errors */ }
+        }
+    }
+}
+
+function touchSignal(signalName) {
+    if (!projectPath) {
+        throw new Error('No project selected');
+    }
+    if (typeof signalName !== 'string' || !signalName.trim()) {
+        throw new Error('Signal name is required');
+    }
+
+    const trimmed = signalName.trim();
+    const normalized = trimmed.startsWith('.') ? trimmed : `.${trimmed}`;
+    const signalPath = getSignalPath(normalized);
+    if (!signalPath) {
+        throw new Error('Signal path unavailable');
+    }
+
+    fs.mkdirSync(path.dirname(signalPath), { recursive: true });
+    const now = new Date();
+    fs.closeSync(fs.openSync(signalPath, 'a'));
+    fs.utimesSync(signalPath, now, now);
+    return { signalPath, signalName: normalized };
+}
 
 function createWindow() {
     debug('WINDOW', 'Creating main window');
@@ -97,10 +135,10 @@ function createWindow() {
     mainWindow = new BrowserWindow({
         width: 1400,
         height: 900,
-        minWidth: 900,
-        minHeight: 600,
+        minWidth: 720,
+        minHeight: 500,
         titleBarStyle: 'hiddenInset',
-        backgroundColor: '#0d1117',
+        backgroundColor: '#0f141b',
         show: false,
         webPreferences: {
             nodeIntegration: false,
@@ -116,8 +154,8 @@ function createWindow() {
         mainWindow.show();
     });
 
-    // Always open DevTools for debugging
-    if (args.includes('--dev') || DEBUG) {
+    // Open DevTools only when explicitly requested.
+    if (args.includes('--dev')) {
         mainWindow.webContents.openDevTools();
         debug('WINDOW', 'DevTools opened');
     }
@@ -215,11 +253,23 @@ ipcMain.handle('write-state', async (event, { filename, data }) => {
         return { success: false, error: 'No project selected' };
     }
     try {
-        fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
+        writeJsonFileAtomic(filePath, data);
         debug('IPC', 'write-state success', { filename });
         return { success: true };
     } catch (e) {
         debug('IPC', 'write-state error', { filename, error: e.message });
+        return { success: false, error: e.message };
+    }
+});
+
+ipcMain.handle('touch-signal', async (event, signalName) => {
+    debug('IPC', 'touch-signal called', { signalName });
+    try {
+        const result = touchSignal(signalName);
+        debug('IPC', 'touch-signal success', result);
+        return { success: true, ...result };
+    } catch (e) {
+        debug('IPC', 'touch-signal error', { signalName, error: e.message });
         return { success: false, error: e.message };
     }
 });

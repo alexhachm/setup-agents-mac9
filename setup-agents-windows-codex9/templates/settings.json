@@ -1,0 +1,21 @@
+{
+  "teammateMode": "in-process",
+  "permissions": {
+    "allow": [
+      "Bash(*)", "Read(*)", "Write(*)", "Edit(*)", "MultiEdit(*)",
+      "Grep(*)", "Glob(*)", "LS(*)",
+      "Bash(.codex/scripts/task-api.sh *)", "Bash(.codex/scripts/state-lock.sh *)"
+    ],
+    "deny": ["Bash(rm -rf /)", "Bash(rm -rf ~)", "Bash(git push --force)"]
+  },
+  "hooks": {
+    "PreToolUse": [{
+      "matcher": "Edit|Write|MultiEdit|Read|Bash",
+      "hooks": [{"type": "command", "command": "bash -c 'bash \"$CODEX_PROJECT_DIR/.codex/hooks/pre-tool-secret-guard.sh\"'"}]
+    }],
+    "Stop": [{
+      "matcher": "",
+      "hooks": [{"type": "command", "command": "bash -c 'bash \"$CODEX_PROJECT_DIR/.codex/hooks/stop-notify.sh\"'"}]
+    }]
+  }
+}

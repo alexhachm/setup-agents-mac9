@@ -24,6 +24,26 @@ curation_due = false   # Set true every 2nd decomposition
 last_activity = now()  # For adaptive signal timeout
 ```
 
+## Native Agent Teams Burst Mode (Experimental, Narrow Use)
+
+Use native teammate delegation only when `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` is set.
+
+Allowed use cases:
+- Tier 3 decomposition where architecture is ambiguous across 3+ domains
+- High-risk change where you need a fast second opinion on edge cases
+- Parallel read-only reconnaissance before final task decomposition
+
+Hard limits:
+- Never use for Tier 1 execution or routine Tier 2 assignment
+- Max 2 teammates per request, max 1 burst cycle before writing task-queue.json
+- Teammates must not write `handoff.json`, `task-queue.json`, or `worker-status.json`
+- You remain the single decision-maker for tier classification and final decomposition
+
+Logging:
+```bash
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [master-2] [TEAM_BURST] id=[request_id] purpose=\"[reason]\" teammates=[N]" >> .claude/logs/activity.log
+```
+
 ## Startup Message
 
 ```
@@ -170,8 +190,9 @@ Go to Step 6.
 ### Step 3c: Tier 3 — Full Decomposition
 
 1. **THINK DEEPLY** — this is your core value. Take your time.
-2. If clarification needed, write to clarification-queue.json and wait for response (poll every 10s).
-3. Write decomposed tasks to task-queue.json:
+2. Optional teammate burst (only when criteria above are met): run read-only teammate analysis, then synthesize findings yourself.
+3. If clarification needed, write to clarification-queue.json and wait for response (poll every 10s).
+4. Write decomposed tasks to task-queue.json:
    ```bash
    bash .claude/scripts/state-lock.sh .claude/state/task-queue.json 'cat > .claude/state/task-queue.json << TASKS
    {
@@ -190,12 +211,12 @@ Go to Step 6.
    }
    TASKS'
    ```
-4. Update handoff.json to `"decomposed"`
-5. Signal Master-3:
+5. Update handoff.json to `"decomposed"`
+6. Signal Master-3:
    ```bash
    touch .claude/signals/.task-signal
    ```
-6. Log:
+7. Log:
    ```bash
    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [master-2] [DECOMPOSE_DONE] id=[request_id] tasks=[N] domains=[list]" >> .claude/logs/activity.log
    ```
@@ -232,11 +253,12 @@ If `commits_since >= 20` or changes span >50% of domains: full reset (Step 7).
 
 Adaptive signal timeout based on activity:
 ```bash
-# If you just processed a request → shorter timeout (stay responsive)
-# If nothing happened → longer timeout (save resources)
-bash .claude/scripts/signal-wait.sh .claude/signals/.handoff-signal 15
+# Signal-first, watchdog-second:
+# - Fast enough when active to stay responsive
+# - Slower fallback when idle to reduce background churn
+bash .claude/scripts/signal-wait.sh .claude/signals/.handoff-signal 25
 ```
-Use 5s timeout if `last_activity` was < 30s ago. Use 15s otherwise.
+Use 10s timeout if `last_activity` was < 30s ago. Use 25s otherwise.
 
 Go back to Step 1.
 
