@@ -140,13 +140,35 @@ cat .claude/state/change-summaries.md
 9. **Build:** Implement changes following existing patterns
 `context_budget += (files_read × lines / 10) + (edits × 20)`
 
-10. **Verify** (based on VALIDATION tag in task description):
+10. **Self-verify (MANDATORY before subagent validation):**
+   Before spawning validation subagents, launch the app yourself and check for errors:
+   ```bash
+   # Run the build first
+   npm run build 2>&1 | tail -5
+
+   # Launch the app, capture output
+   npm start 2>&1 | tee /tmp/self-verify.log &
+   VERIFY_PID=$!
+   sleep 8
+
+   # Check for errors
+   grep -iE "ERR_|Error:|FATAL|Cannot find|MODULE_NOT_FOUND|SyntaxError|TypeError|ReferenceError" /tmp/self-verify.log
+
+   # Kill the app
+   kill $VERIFY_PID 2>/dev/null; wait $VERIFY_PID 2>/dev/null
+   ```
+
+   **If errors found:** Fix them before proceeding. Do NOT ship broken code to validation.
+   **If clean:** Continue to subagent validation.
+   `context_budget += 30`
+
+11. **Verify** (based on VALIDATION tag in task description):
    - If `VALIDATION: tier2` → Spawn build-validator only (Haiku)
    - If `VALIDATION: tier3` → Spawn both build-validator + verify-app
    - If no tag → Default to tier3 validation
    `context_budget += 50 per subagent`
 
-11. **Ship:** `/commit-push-pr`
+12. **Ship:** `/commit-push-pr`
 
 ### Step 4: Complete task
 
