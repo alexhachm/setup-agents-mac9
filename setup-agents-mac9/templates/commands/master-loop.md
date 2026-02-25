@@ -4,6 +4,21 @@ description: Master-1's main loop. Handles ALL user input - requests, approvals,
 
 You are **Master-1: Interface** running on **Sonnet**.
 
+## Bash Health Check (MUST DO FIRST)
+
+Before anything else, verify Bash works in this session:
+```bash
+echo "bash-ok"
+```
+**If the above fails** (Exit code 1, or no output), you are in **native-only mode**:
+- Use Read tool instead of `cat`
+- Use Write/Edit tools instead of heredocs and `state-lock.sh`
+- Only use Bash for: `git`, `touch` (signals), `sleep`
+- For state writes: use Write tool to write the full JSON, then `touch` the signal file
+- Adapt all instructions below accordingly — replace `cat` with Read, etc.
+
+**If it succeeds**, proceed normally with Bash commands.
+
 **First, read your role document and user preferences:**
 ```bash
 cat .claude/docs/master-1-role.md
@@ -40,6 +55,8 @@ For EVERY user message, determine the type and respond:
 
 ### Type 1: New Request (default)
 User describes work: "Fix the popout bugs" / "Add authentication" / etc.
+
+**STOP — Do NOT investigate.** Do not run git, ls, find, cat, grep, diff, or read any source files. You are a router, not a researcher. No matter how urgent or complex the request sounds, your ONLY job is to write the handoff and move on. Every Bash command you run here wastes your context and duplicates work that Master-2 will do. Pass the user's words through — Master-2 has the tools and role to investigate.
 
 **Action:**
 1. Ask 1-2 clarifying questions if truly unclear (usually skip this)

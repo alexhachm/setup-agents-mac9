@@ -6,9 +6,9 @@ description: Ship completed work with error handling.
 2. `git diff --cached --stat`
 3. **Secret check:** `git diff --cached` — ABORT if you see API keys, tokens, passwords, .env values, or private keys. Say "BLOCKED: secrets detected" and do NOT proceed.
 4. `git commit -m "type(scope): description"`
-5. Push with retry:
+5. Push (workers own their branch exclusively — force-push if behind):
    ```bash
-   git push origin HEAD || (git pull --rebase origin HEAD && git push origin HEAD)
+   git push origin HEAD || git push --force-with-lease origin HEAD
    ```
 6. Create PR:
    ```bash

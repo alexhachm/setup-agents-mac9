@@ -73,20 +73,35 @@ echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [worker-N] [TEAM_BURST] task=\"[subject]\
 ## Phase 2: Find and Execute Task
 
 ### Step 1: Check for assigned task
-```bash
-TaskList()
-```
 
-Look for tasks where:
-- Description contains `ASSIGNED_TO: worker-N` (your ID)
-- Status is "pending" or "open"
-
-**If no task found:** Wait 5 seconds, then check once more:
+Read your task file (written by M2 or M3 before launching you):
 ```bash
-sleep 5
-TaskList()
+cat .claude/state/tasks/worker-N.json 2>/dev/null
 ```
-If still no task → go to **Phase 3 (No-Task Exit)**.
+(Replace N with your worker number.)
+
+**If the file exists and contains a task:**
+1. Parse the task details (subject, description, domain, files, validation, tier, request_id)
+2. Create a local TaskCreate for your own progress tracking:
+   ```
+   TaskCreate({
+     subject: "[subject from file]",
+     description: "[description from file]",
+     activeForm: "Working on [subject]..."
+   })
+   ```
+3. Remove the task file so you don't re-read it on a future launch:
+   ```bash
+   rm .claude/state/tasks/worker-N.json
+   ```
+4. Proceed to Step 2 (validate domain)
+
+**If the file does NOT exist:** Check worker-status.json as a fallback:
+```bash
+jq -r '.["worker-N"]' .claude/state/worker-status.json
+```
+If your entry shows `status: "assigned"` and `current_task` is set, use that as your task.
+Otherwise → go to **Phase 3 (No-Task Exit)**.
 
 **RESET tasks take absolute priority.** If subject starts with "RESET:":
 1. **Distill first** (Phase 4)
@@ -141,24 +156,47 @@ cat .claude/state/change-summaries.md
 `context_budget += (files_read × lines / 10) + (edits × 20)`
 
 10. **Self-verify (MANDATORY before subagent validation):**
-   Before spawning validation subagents, launch the app yourself and check for errors:
+   Before spawning validation subagents, run the project's build/dev check.
+
+   **First, detect the correct commands from the codebase map:**
    ```bash
-   # Run the build first
-   npm run build 2>&1 | tail -5
-
-   # Launch the app, capture output
-   npm start 2>&1 | tee /tmp/self-verify.log &
-   VERIFY_PID=$!
-   sleep 8
-
-   # Check for errors
-   grep -iE "ERR_|Error:|FATAL|Cannot find|MODULE_NOT_FOUND|SyntaxError|TypeError|ReferenceError" /tmp/self-verify.log
-
-   # Kill the app
-   kill $VERIFY_PID 2>/dev/null; wait $VERIFY_PID 2>/dev/null
+   # Read launch commands from codebase-map.json (written by Master-2's scan)
+   cat .claude/state/codebase-map.json 2>/dev/null | jq -r '.launch_commands[]? | select(.category == "build") | .command' 2>/dev/null | head -1
    ```
 
-   **If errors found:** Fix them before proceeding. Do NOT ship broken code to validation.
+   **Then run the build command (adapt to your project):**
+   ```bash
+   # Use the detected build command, or fall back to common patterns:
+   # - Node.js: npm run build
+   # - Python: python -m py_compile <main_file>
+   # - Go: go build ./...
+   # - Rust: cargo build
+   # If codebase-map.json has launch_commands, use those instead
+   BUILD_CMD=$(jq -r '[.launch_commands[]? | select(.category == "build")][0].command // empty' .claude/state/codebase-map.json 2>/dev/null)
+   if [ -z "$BUILD_CMD" ]; then
+       # Auto-detect from project files
+       if [ -f package.json ]; then BUILD_CMD="npm run build";
+       elif [ -f Cargo.toml ]; then BUILD_CMD="cargo build";
+       elif [ -f go.mod ]; then BUILD_CMD="go build ./...";
+       elif [ -f pyproject.toml ] || [ -f setup.py ]; then BUILD_CMD="python -m compileall . -q";
+       else BUILD_CMD="echo 'No build system detected — skipping build check'"; fi
+   fi
+   eval "$BUILD_CMD" 2>&1 | tail -10
+   ```
+
+   **If build fails:** Fix the errors before proceeding. Do NOT ship broken code to validation.
+   **If build passes:** Optionally run a quick smoke test if a dev/start command exists:
+   ```bash
+   DEV_CMD=$(jq -r '[.launch_commands[]? | select(.category == "dev")][0].command // empty' .claude/state/codebase-map.json 2>/dev/null)
+   if [ -n "$DEV_CMD" ]; then
+       eval "$DEV_CMD" 2>&1 | tee /tmp/self-verify.log &
+       VERIFY_PID=$!
+       sleep 8
+       grep -iE "ERR_|Error:|FATAL|Cannot find|MODULE_NOT_FOUND|SyntaxError|TypeError|ReferenceError|panic|FAILED" /tmp/self-verify.log || true
+       kill $VERIFY_PID 2>/dev/null; wait $VERIFY_PID 2>/dev/null
+   fi
+   ```
+   **If errors found:** Fix them before proceeding.
    **If clean:** Continue to subagent validation.
    `context_budget += 30`
 
@@ -210,14 +248,14 @@ SUMMARY'
 Wait ONCE for a follow-up task assignment (15 seconds):
 ```bash
 bash .claude/scripts/signal-wait.sh .claude/signals/.worker-signal 15
-TaskList()
+cat .claude/state/tasks/worker-N.json 2>/dev/null
 ```
 
-Look for tasks where:
-- Description contains `ASSIGNED_TO: worker-N` (your ID)
-- Status is "pending" or "open"
-
-**If new task found:** → go back to **Phase 2, Step 2** (validate domain).
+**If the task file exists and contains a task:**
+1. Parse the task details
+2. Create a local TaskCreate for your own progress tracking
+3. Remove the task file: `rm .claude/state/tasks/worker-N.json`
+4. → go back to **Phase 2, Step 2** (validate domain).
 
 **If no task found:**
 1. Distill knowledge (lightweight — domain knowledge file only, skip mistakes.md unless you hit problems):

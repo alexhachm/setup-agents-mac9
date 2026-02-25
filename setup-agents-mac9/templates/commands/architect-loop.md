@@ -105,18 +105,24 @@ echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [master-2] [TIER_CLASSIFY] id=[request_id
 
 1. Identify the exact file(s) and change
 2. Make the change
-3. Run build check inline:
+3. Run build check inline (use detected build command from codebase-map.json):
    ```bash
-   npm run build 2>&1 || echo "BUILD_CHECK_RESULT: FAIL"
+   BUILD_CMD=$(jq -r '[.launch_commands[]? | select(.category == "build")][0].command // empty' .claude/state/codebase-map.json 2>/dev/null)
+   if [ -z "$BUILD_CMD" ]; then
+       if [ -f package.json ]; then BUILD_CMD="npm run build";
+       elif [ -f Cargo.toml ]; then BUILD_CMD="cargo build";
+       elif [ -f go.mod ]; then BUILD_CMD="go build ./...";
+       else BUILD_CMD="echo 'No build system detected'"; fi
+   fi
+   eval "$BUILD_CMD" 2>&1 || echo "BUILD_CHECK_RESULT: FAIL"
    ```
-   (Adapt build command to project — check package.json scripts)
 4. If build fails: fix or escalate to Tier 2
 5. If build passes: commit and push
    ```bash
    git add -A
    git diff --cached  # Secret check — ABORT if sensitive data
    git commit -m "type(scope): description"
-   git push origin HEAD || (git pull --rebase origin HEAD && git push origin HEAD)
+   git push origin HEAD || git push --force-with-lease origin HEAD
    gh pr create --base $(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@' || echo main) --fill 2>&1
    ```
 6. Update handoff.json:
@@ -165,8 +171,27 @@ Go to Step 6.
    ```bash
    bash .claude/scripts/state-lock.sh .claude/state/worker-status.json 'jq ".\"worker-N\".claimed_by = null | .\"worker-N\".status = \"assigned\" | .\"worker-N\".current_task = \"[subject]\"" .claude/state/worker-status.json > /tmp/ws.json && mv /tmp/ws.json .claude/state/worker-status.json'
    ```
-5. Update handoff.json to `"assigned_tier2"`
-6. **Launch or signal the worker:**
+5. Update handoff.json:
+   ```bash
+   bash .claude/scripts/state-lock.sh .claude/state/handoff.json "jq '.status = \"assigned_tier2\" | .tier = 2' .claude/state/handoff.json > /tmp/ho.json && mv /tmp/ho.json .claude/state/handoff.json"
+   ```
+6. **Write task file for the worker** (cross-session handoff — the worker reads this on startup):
+   ```bash
+   mkdir -p .claude/state/tasks
+   cat > .claude/state/tasks/worker-N.json << 'TASK'
+   {
+     "subject": "[task title]",
+     "description": "REQUEST_ID: [id]\nDOMAIN: [domain]\nASSIGNED_TO: worker-N\nFILES: [files]\nVALIDATION: tier2\nTIER: 2\n\n[detailed requirements]\n\n[success criteria]",
+     "domain": "[domain]",
+     "files": ["file1.js", "file2.js"],
+     "validation": "tier2",
+     "tier": 2,
+     "request_id": "[id]"
+   }
+   TASK
+   ```
+   Use the same content you passed to TaskCreate above. The task file is the cross-session handoff; TaskCreate is only for your own local tracking.
+7. **Launch or signal the worker:**
    ```bash
    worker_status=$(jq -r '.["worker-N"].status' .claude/state/worker-status.json)
 
@@ -178,7 +203,7 @@ Go to Step 6.
        # Log: [SIGNAL_WORKER] worker=worker-N reason=tier2-assign
    fi
    ```
-7. Log:
+8. Log:
    ```bash
    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [master-2] [TIER2_ASSIGN] id=[request_id] worker=worker-N task=\"[subject]\"" >> .claude/logs/activity.log
    ```
@@ -197,6 +222,7 @@ Go to Step 6.
    bash .claude/scripts/state-lock.sh .claude/state/task-queue.json 'cat > .claude/state/task-queue.json << TASKS
    {
      "request_id": "[request_id]",
+     "tier": 3,
      "decomposed_at": "[ISO timestamp]",
      "tasks": [
        {
@@ -211,7 +237,10 @@ Go to Step 6.
    }
    TASKS'
    ```
-5. Update handoff.json to `"decomposed"`
+5. Update handoff.json:
+   ```bash
+   bash .claude/scripts/state-lock.sh .claude/state/handoff.json "jq '.status = \"decomposed\" | .tier = 3' .claude/state/handoff.json > /tmp/ho.json && mv /tmp/ho.json .claude/state/handoff.json"
+   ```
 6. Signal Master-3:
    ```bash
    touch .claude/signals/.task-signal

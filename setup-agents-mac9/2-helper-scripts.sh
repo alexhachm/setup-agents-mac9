@@ -44,8 +44,9 @@ elif command -v inotifywait &>/dev/null; then
     # Linux: use inotifywait
     inotifywait -t "$TIMEOUT" -e modify,create "$SIGNAL_FILE" 2>/dev/null || true
 
-elif command -v powershell.exe &>/dev/null; then
-    # Windows: use .NET FileSystemWatcher via PowerShell for instant notification
+elif command -v powershell.exe &>/dev/null && ! grep -qi microsoft /proc/version 2>/dev/null; then
+    # Native Windows (Git Bash/MSYS2): use .NET FileSystemWatcher via PowerShell
+    # Skip this branch under WSL — Resolve-Path can't handle WSL paths
     SIGNAL_DIR=$(dirname "$SIGNAL_FILE")
     SIGNAL_NAME=$(basename "$SIGNAL_FILE")
     TIMEOUT_MS=$((TIMEOUT * 1000))
@@ -152,13 +153,27 @@ fi
 
 # ==============================================================================
 # FILE: scripts/add-worker.sh
-# (Restored from v7 — lost during v7→v8 modular split)
+# (Restored from v7 — now includes full link setup + launcher generation)
 # ==============================================================================
 
 #!/usr/bin/env bash
 set -e
 PROJECT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$PROJECT_DIR"
+
+# Cross-platform directory link helper (NTFS junction on Windows, symlink elsewhere)
+link_dir() {
+    local link_path="$1" target_path="$2"
+    rm -rf "$link_path"
+    if [[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin* ]]; then
+        local win_link win_target
+        win_link=$(cygpath -w "$link_path" 2>/dev/null || echo "$link_path" | sed 's|/|\\|g')
+        win_target=$(cd "$target_path" 2>/dev/null && cygpath -w "$(pwd)" 2>/dev/null || cygpath -w "$target_path" 2>/dev/null || echo "$target_path" | sed 's|/|\\|g')
+        powershell.exe -Command "New-Item -ItemType Junction -Path '$win_link' -Target '$win_target'" > /dev/null 2>&1
+    else
+        ln -sf "$target_path" "$link_path"
+    fi
+}
 
 # Find the lowest available worker slot (1-8) by checking for gaps
 next_num=""
@@ -180,33 +195,70 @@ worktree_path=".worktrees/wt-$next_num"
 git branch -D "$branch_name" 2>/dev/null || true
 git worktree add "$worktree_path" -b "$branch_name"
 
-# Link shared state into the new worktree (junction on Windows, symlink elsewhere)
+# Link shared state into the new worktree
 shared_state_dir="$PROJECT_DIR/.claude-shared-state"
 if [ -d "$shared_state_dir" ]; then
-    rm -rf "$worktree_path/.claude/state"
-    if [[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin* ]]; then
-        win_link=$(cygpath -w "$worktree_path/.claude/state")
-        win_target=$(cygpath -w "$shared_state_dir")
-        cmd //c "mklink /J \"$win_link\" \"$win_target\"" > /dev/null 2>&1
-    else
-        ln -sf "../../../.claude-shared-state" "$worktree_path/.claude/state"
-    fi
+    link_dir "$worktree_path/.claude/state" "$shared_state_dir"
 fi
 
 # Link logs directory so new worker can write to shared log
 mkdir -p "$worktree_path/.claude/logs"
-rm -rf "$worktree_path/.claude/logs"
-if [[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin* ]]; then
-    win_link=$(cygpath -w "$worktree_path/.claude/logs")
-    win_target=$(cygpath -w "$PROJECT_DIR/.claude/logs")
-    cmd //c "mklink /J \"$win_link\" \"$win_target\"" > /dev/null 2>&1
-else
-    ln -sf "../../../.claude/logs" "$worktree_path/.claude/logs"
+link_dir "$worktree_path/.claude/logs" "$PROJECT_DIR/.claude/logs"
+
+# Link knowledge directory (shared across all agents)
+link_dir "$worktree_path/.claude/knowledge" "$PROJECT_DIR/.claude/knowledge"
+
+# Link signals directory (shared for cross-agent signaling)
+link_dir "$worktree_path/.claude/signals" "$PROJECT_DIR/.claude/signals"
+
+# Copy commands, hooks, scripts so worker has /worker-loop, /commit-push-pr, etc.
+for dir in commands hooks scripts; do
+    if [ -d "$PROJECT_DIR/.claude/$dir" ]; then
+        mkdir -p "$worktree_path/.claude/$dir"
+        cp -r "$PROJECT_DIR/.claude/$dir/"* "$worktree_path/.claude/$dir/" 2>/dev/null || true
+    fi
+done
+
+# Copy settings.json
+if [ -f "$PROJECT_DIR/.claude/settings.json" ]; then
+    cp "$PROJECT_DIR/.claude/settings.json" "$worktree_path/.claude/settings.json"
 fi
 
-# Copy worker CLAUDE.md
+# Copy worker CLAUDE.md (try wt-1 first, fall back to project root)
 if [ -f "$PROJECT_DIR/.worktrees/wt-1/CLAUDE.md" ]; then
     cp "$PROJECT_DIR/.worktrees/wt-1/CLAUDE.md" "$worktree_path/CLAUDE.md"
+elif [ -f "$PROJECT_DIR/CLAUDE.md" ]; then
+    cp "$PROJECT_DIR/CLAUDE.md" "$worktree_path/CLAUDE.md"
+fi
+
+# Generate launcher script for the new worker
+launcher_dir="$PROJECT_DIR/.claude/launchers"
+if [ -d "$launcher_dir" ]; then
+    cat > "$launcher_dir/worker-$next_num.sh" << LAUNCHER
+#!/usr/bin/env bash
+clear
+printf '\\n\\033[1;44m\\033[1;37m  I AM WORKER-$next_num (Opus)  \\033[0m\\n\\n'
+cd '$PROJECT_DIR/.worktrees/wt-$next_num'
+exec env CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 claude --model opus --dangerously-skip-permissions '/worker-loop'
+LAUNCHER
+    chmod +x "$launcher_dir/worker-$next_num.sh"
+
+    cat > "$launcher_dir/worker-$next_num-continue.sh" << LAUNCHER
+#!/usr/bin/env bash
+clear
+printf '\\n\\033[1;44m\\033[1;37m  I AM WORKER-$next_num (Opus) [CONTINUE]  \\033[0m\\n\\n'
+cd '$PROJECT_DIR/.worktrees/wt-$next_num'
+exec env CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 claude --continue --model opus --dangerously-skip-permissions
+LAUNCHER
+    chmod +x "$launcher_dir/worker-$next_num-continue.sh"
+fi
+
+# Add new worker to worker-status.json (if jq available)
+if command -v jq &>/dev/null; then
+    ws_file="$PROJECT_DIR/.claude/state/worker-status.json"
+    if [ -f "$ws_file" ]; then
+        jq ".\"worker-$next_num\" = {\"status\":\"idle\",\"domain\":null,\"current_task\":null,\"tasks_completed\":0,\"context_budget\":0,\"claimed_by\":null,\"last_heartbeat\":null}" "$ws_file" > /tmp/ws_add.json && mv /tmp/ws_add.json "$ws_file"
+    fi
 fi
 
 # Update config file worker count (key=value format)
@@ -257,11 +309,16 @@ fi
 
 # Platform-specific terminal launch (non-blocking)
 if [[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin* ]]; then
-    # Windows: prefer Windows Terminal, fall back to start bash
+    # Windows: convert Unix paths to Windows paths for native executables
+    WIN_LAUNCHER=$(cygpath -w "$LAUNCHER" 2>/dev/null || echo "$LAUNCHER" | sed 's|/|\\|g')
+    WIN_WORKTREE=$(cygpath -w "$WORKTREE" 2>/dev/null || echo "$WORKTREE" | sed 's|/|\\|g')
+
     if command -v wt.exe &>/dev/null; then
-        wt.exe new-tab --title "Worker-$WORKER_NUM" bash "$LAUNCHER" &
+        # Windows Terminal: use bash to execute launcher
+        wt.exe new-tab --title "Worker-$WORKER_NUM" --startingDirectory "$WIN_WORKTREE" bash -l "$LAUNCHER" &
     else
-        start bash "$LAUNCHER" &
+        # Fallback: use cmd start with Git Bash
+        start bash -l "$LAUNCHER" &
     fi
 elif [[ "$OSTYPE" == darwin* ]]; then
     # macOS: open new Terminal window

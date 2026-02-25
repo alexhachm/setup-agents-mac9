@@ -29,11 +29,16 @@ fi
 
 # Platform-specific terminal launch (non-blocking)
 if [[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin* ]]; then
-    # Windows: prefer Windows Terminal, fall back to start bash
+    # Windows: convert Unix paths to Windows paths for native executables
+    WIN_LAUNCHER=$(cygpath -w "$LAUNCHER" 2>/dev/null || echo "$LAUNCHER" | sed 's|/|\\|g')
+    WIN_WORKTREE=$(cygpath -w "$WORKTREE" 2>/dev/null || echo "$WORKTREE" | sed 's|/|\\|g')
+
     if command -v wt.exe &>/dev/null; then
-        wt.exe new-tab --title "Worker-$WORKER_NUM" bash "$LAUNCHER" &
+        # Windows Terminal: pass Windows path and use bash to execute
+        wt.exe new-tab --title "Worker-$WORKER_NUM" --startingDirectory "$WIN_WORKTREE" bash -l "$LAUNCHER" &
     else
-        start bash "$LAUNCHER" &
+        # Fallback: use cmd start with Git Bash
+        start bash -l "$LAUNCHER" &
     fi
 elif [[ "$OSTYPE" == darwin* ]]; then
     # macOS: open new Terminal window

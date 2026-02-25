@@ -26,8 +26,9 @@ elif command -v inotifywait &>/dev/null; then
     # Linux: use inotifywait
     inotifywait -t "$TIMEOUT" -e modify,create "$SIGNAL_FILE" 2>/dev/null || true
 
-elif command -v powershell.exe &>/dev/null; then
-    # Windows: use .NET FileSystemWatcher via PowerShell for instant notification
+elif command -v powershell.exe &>/dev/null && ! grep -qi microsoft /proc/version 2>/dev/null; then
+    # Native Windows (Git Bash/MSYS2): use .NET FileSystemWatcher via PowerShell
+    # Skip this branch under WSL — Resolve-Path can't handle WSL paths
     SIGNAL_DIR=$(dirname "$SIGNAL_FILE")
     SIGNAL_NAME=$(basename "$SIGNAL_FILE")
     TIMEOUT_MS=$((TIMEOUT * 1000))

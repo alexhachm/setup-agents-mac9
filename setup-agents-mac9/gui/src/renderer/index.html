@@ -14,7 +14,7 @@
         <div id="connection-screen" class="screen active">
             <div class="setup-screen">
                 <div class="setup-header">
-                    <div class="logo">🧠</div>
+                    <div class="logo">ACC</div>
                     <h1>Agent Control Center</h1>
                     <p class="setup-subtitle">Set up a new project or launch an existing one</p>
                 </div>
@@ -22,19 +22,19 @@
                 <div class="setup-body">
                     <!-- Left: Recent Projects -->
                     <div class="setup-recent">
-                        <h3>📂 Recent Projects</h3>
+                        <h3>Recent Projects</h3>
                         <div id="recent-projects-list" class="recent-projects-list">
                             <div class="recent-empty">No recent projects found</div>
                         </div>
                         <div class="setup-separator">
-                            <button id="select-project-btn" class="secondary-btn full-width">📁 Browse for existing
-                                project…</button>
+                            <button id="select-project-btn" class="secondary-btn full-width">Browse for existing
+                                project...</button>
                         </div>
                     </div>
 
                     <!-- Right: New Project Form -->
                     <div class="setup-form-panel">
-                        <h3>🆕 New Project</h3>
+                        <h3>New Project</h3>
                         <div class="setup-form">
                             <div class="form-group">
                                 <label for="setup-repo-url">Git Repository URL</label>
@@ -46,7 +46,7 @@
                                 <label for="setup-project-path">Project Path</label>
                                 <div class="input-with-btn">
                                     <input type="text" id="setup-project-path" placeholder="~/Desktop/my-project" />
-                                    <button id="setup-browse-btn" class="icon-btn" title="Browse">📁</button>
+                                    <button id="setup-browse-btn" class="icon-btn" title="Browse">...</button>
                                 </div>
                             </div>
 
@@ -69,18 +69,18 @@
                                     <div class="mode-toggle">
                                         <label class="mode-option">
                                             <input type="radio" name="setup-mode" value="fresh" checked />
-                                            <span>🆕 Fresh</span>
+                                            <span>Fresh</span>
                                         </label>
                                         <label class="mode-option">
                                             <input type="radio" name="setup-mode" value="continue" />
-                                            <span>▶️ Continue</span>
+                                            <span>Continue</span>
                                         </label>
                                     </div>
                                 </div>
                             </div>
 
                             <button id="setup-run-btn" class="primary-btn full-width">
-                                🚀 Setup & Launch
+                                Setup & Launch
                             </button>
                         </div>
                     </div>
@@ -89,7 +89,7 @@
                 <!-- Setup Progress Console -->
                 <div id="setup-progress-panel" class="setup-progress-panel hidden">
                     <div class="progress-header">
-                        <h3>⚙️ Setup Progress</h3>
+                        <h3>Setup Progress</h3>
                         <span id="setup-status-badge" class="setup-status-badge">Running…</span>
                     </div>
                     <pre id="setup-console" class="setup-console"></pre>
@@ -104,9 +104,9 @@
             <!-- Header -->
             <header class="header">
                 <div class="header-left">
-                    <span class="header-icon">🧠</span>
+                    <span class="header-logo">ACC</span>
                     <div class="header-text">
-                        <h1>Agent Control Center <span class="version-badge">v2</span></h1>
+                        <h1>Agent Control Center</h1>
                     </div>
                 </div>
                 <div class="header-center">
@@ -120,53 +120,39 @@
                         <span class="status-dot connected"></span>
                         <span id="project-name" class="project-name"></span>
                     </div>
-                    <button id="debug-toggle-btn" class="debug-btn" title="Toggle Debug Panel">🐛</button>
+                    <button id="debug-toggle-btn" class="debug-btn" title="Toggle Debug Panel">DBG</button>
                 </div>
             </header>
 
-            <!-- Command Bar -->
-            <div class="command-bar-wrapper">
-                <div id="clarification-banner" class="clarification-banner hidden">
-                    <span class="clarification-icon">❓</span>
-                    <div class="clarification-content">
-                        <span class="clarification-label">Master-2 needs clarification:</span>
-                        <span id="clarification-question"></span>
-                    </div>
-                </div>
-                <!-- Stagger Banner -->
-                <div id="stagger-banner" class="stagger-banner hidden">
-                    <span class="stagger-icon">⚠️</span>
-                    <span id="stagger-message"></span>
-                </div>
-                <div class="command-bar">
-                    <span class="command-icon">⌨️</span>
-                    <input type="text" id="command-input" placeholder="Tell Master-1 what you want..." />
-                    <button id="send-btn" class="send-btn">↑</button>
-                </div>
-            </div>
-
             <!-- Tab Navigation -->
             <nav class="tab-nav">
-                <button class="tab-btn active" data-tab="dashboard">📊 Dashboard</button>
-                <button class="tab-btn" data-tab="timeline">⏱ Timeline</button>
-                <button class="tab-btn" data-tab="health">💓 Health</button>
-                <button class="tab-btn" data-tab="knowledge">📚 Knowledge</button>
-                <button class="tab-btn" data-tab="signals">📡 Signals</button>
-                <button class="tab-btn" data-tab="stats">📈 Stats</button>
-                <button class="tab-btn" data-tab="launch">🚀 Launch</button>
+                <button class="tab-btn active" data-tab="pipeline">Pipeline</button>
+                <button class="tab-btn" data-tab="dashboard">Chat</button>
+                <button class="tab-btn" data-tab="timeline">Timeline</button>
+                <button class="tab-btn" data-tab="health">Health</button>
+                <button class="tab-btn" data-tab="knowledge">Knowledge</button>
+                <button class="tab-btn" data-tab="signals">Signals</button>
+                <button class="tab-btn" data-tab="stats">Stats</button>
+                <button class="tab-btn" data-tab="launch">Launch</button>
             </nav>
 
             <!-- Tab Content Area -->
             <main class="main-content">
 
-                <!-- ═══════ TAB: Dashboard (original v1 content) ═══════ -->
-                <div class="tab-content active" data-tab="dashboard">
+                <!-- ═══════ TAB: Pipeline (Agent Flow Dashboard) ═══════ -->
+                <div class="tab-content active" data-tab="pipeline">
+                    <!-- Animated Pipeline Card -->
+                    <section class="animated-pipeline-section">
+                        <div id="animated-pipeline" class="animated-pipeline">
+                            <div class="apl-no-request">No active request</div>
+                        </div>
+                    </section>
+
                     <!-- Master Agents Row -->
                     <section class="masters-section">
                         <div class="master-cards">
                             <div class="master-card master-1" data-master="1">
                                 <div class="master-header">
-                                    <span class="master-icon">💬</span>
                                     <div class="master-info">
                                         <strong>Master-1</strong>
                                         <small>Interface</small>
@@ -177,7 +163,6 @@
                             </div>
                             <div class="master-card master-2" data-master="2">
                                 <div class="master-header">
-                                    <span class="master-icon">🔨</span>
                                     <div class="master-info">
                                         <strong>Master-2</strong>
                                         <small>Architect</small>
@@ -189,7 +174,6 @@
                             </div>
                             <div class="master-card master-3" data-master="3">
                                 <div class="master-header">
-                                    <span class="master-icon">📋</span>
                                     <div class="master-info">
                                         <strong>Master-3</strong>
                                         <small>Allocator</small>
@@ -205,18 +189,17 @@
                     <!-- Request List with Tier Badges -->
                     <section class="request-list-section">
                         <div class="section-header">
-                            <h2>📋 Requests</h2>
+                            <h2>Requests</h2>
                         </div>
                         <div id="request-list" class="request-list"></div>
                     </section>
 
                     <!-- Workflow Pipeline -->
                     <section class="pipeline-section">
-                        <h2>📊 Workflow Pipeline</h2>
+                        <h2>Workflow Pipeline</h2>
                         <div class="pipeline">
                             <div class="pipeline-stage" id="stage-input" data-stage="input">
                                 <div class="stage-header">
-                                    <span class="stage-icon">📝</span>
                                     <span>Your Request</span>
                                     <span class="stage-count" id="input-count">0</span>
                                 </div>
@@ -226,7 +209,6 @@
                             <div class="pipeline-arrow">→</div>
                             <div class="pipeline-stage" id="stage-decomp" data-stage="decomp">
                                 <div class="stage-header">
-                                    <span class="stage-icon">🔨</span>
                                     <span>Decomposing</span>
                                     <span class="stage-count" id="decomp-count">0</span>
                                 </div>
@@ -236,7 +218,6 @@
                             <div class="pipeline-arrow">→</div>
                             <div class="pipeline-stage" id="stage-queue" data-stage="queue">
                                 <div class="stage-header">
-                                    <span class="stage-icon">📋</span>
                                     <span>Task Queue</span>
                                     <span class="stage-count" id="queue-count">0</span>
                                 </div>
@@ -246,7 +227,6 @@
                             <div class="pipeline-arrow">→</div>
                             <div class="pipeline-stage" id="stage-active" data-stage="active">
                                 <div class="stage-header">
-                                    <span class="stage-icon">⚙️</span>
                                     <span>Active</span>
                                     <span class="stage-count" id="active-count">0</span>
                                 </div>
@@ -260,14 +240,14 @@
                     <div class="bottom-row">
                         <section class="worker-pool">
                             <div class="section-header">
-                                <h2>👥 Workers <span id="worker-summary"></span></h2>
+                                <h2>Workers <span id="worker-summary"></span></h2>
                                 <button class="collapse-btn" data-target="worker-grid">−</button>
                             </div>
                             <div id="worker-grid" class="worker-grid"></div>
                         </section>
                         <section class="activity-feed">
                             <div class="section-header">
-                                <h2>📜 Activity</h2>
+                                <h2>Activity</h2>
                                 <label class="autoscroll-toggle">
                                     <input type="checkbox" id="autoscroll" checked />
                                     Auto
@@ -275,6 +255,61 @@
                             </div>
                             <div id="activity-log" class="activity-log"></div>
                         </section>
+                    </div>
+                </div>
+
+                <!-- ═══════ TAB: Chat + Files ═══════ -->
+                <div class="tab-content" data-tab="dashboard">
+                    <div class="chat-files-layout">
+                        <!-- Left: File Tree Sidebar -->
+                        <div class="file-sidebar">
+                            <div class="file-tree-header">
+                                <span class="file-tree-title">Explorer</span>
+                                <button id="file-tree-refresh" class="file-tree-refresh-btn" title="Refresh">↻</button>
+                            </div>
+                            <div id="file-tree" class="file-tree"></div>
+                        </div>
+
+                        <!-- Center: File Viewer -->
+                        <div class="file-editor-panel">
+                            <div class="file-viewer-header">
+                                <span id="file-viewer-path" class="file-viewer-path">No file selected</span>
+                                <span id="file-viewer-meta" class="file-viewer-meta"></span>
+                            </div>
+                            <div class="file-viewer-body">
+                                <div class="editor-gutter" id="editor-gutter"></div>
+                                <pre id="file-viewer-content" class="file-viewer-content"><code>Select a file from the explorer to view its contents.</code></pre>
+                            </div>
+                        </div>
+
+                        <!-- Right: Chat Panel -->
+                        <div class="chat-panel">
+                            <!-- Clarification + Stagger banners -->
+                            <div id="clarification-banner" class="clarification-banner hidden">
+                                <div class="clarification-content">
+                                    <span class="clarification-label">Master-2 needs clarification:</span>
+                                    <span id="clarification-question"></span>
+                                </div>
+                            </div>
+                            <div id="stagger-banner" class="stagger-banner hidden">
+                                <span id="stagger-message"></span>
+                            </div>
+
+                            <!-- Chat Messages -->
+                            <div id="chat-messages" class="chat-messages">
+                                <div class="chat-welcome" id="chat-welcome">
+                                    <div class="welcome-icon">ACC</div>
+                                    <h2>Agent Control Center</h2>
+                                    <p>Send a request below. Master-1 coordinates the multi-agent pipeline.</p>
+                                </div>
+                            </div>
+
+                            <!-- Command Input -->
+                            <div class="chat-input-bar">
+                                <input type="text" id="command-input" placeholder="Tell Master-1 what you want..." />
+                                <button id="send-btn" class="send-btn">↑</button>
+                            </div>
+                        </div>
                     </div>
                 </div>
 
@@ -286,7 +321,7 @@
                             <select id="timeline-request-select">
                                 <option value="">— Select a request —</option>
                             </select>
-                            <button id="timeline-refresh-btn" class="secondary-btn">🔄 Refresh</button>
+                            <button id="timeline-refresh-btn" class="secondary-btn">Refresh</button>
                         </div>
                         <div id="timeline-summary" class="timeline-summary"></div>
                     </div>
@@ -315,7 +350,7 @@
                 <!-- ═══════ TAB: Agent Health ═══════ -->
                 <div class="tab-content" data-tab="health">
                     <div class="health-header">
-                        <h2 class="tab-panel-title">💓 Agent Health Dashboard</h2>
+                        <h2 class="tab-panel-title">Agent Health Dashboard</h2>
                         <span id="health-update-time" class="health-update-time"></span>
                     </div>
                     <div id="health-cards" class="health-cards">
@@ -327,7 +362,7 @@
                 <div class="tab-content" data-tab="knowledge">
                     <div class="knowledge-layout">
                         <div class="knowledge-sidebar">
-                            <h2 class="tab-panel-title">📚 Knowledge Files</h2>
+                            <h2 class="tab-panel-title">Knowledge Files</h2>
                             <div id="knowledge-file-list" class="knowledge-file-list">
                                 <div class="knowledge-empty">Loading knowledge files...</div>
                             </div>
@@ -346,7 +381,7 @@
 
                 <!-- ═══════ TAB: Signals ═══════ -->
                 <div class="tab-content" data-tab="signals">
-                    <h2 class="tab-panel-title">📡 Signal Monitor</h2>
+                    <h2 class="tab-panel-title">Signal Monitor</h2>
                     <div class="signal-strip">
                         <span class="signal-strip-label">LIVE SIGNALS</span>
                         <div id="signal-pills" class="signal-pills"></div>
@@ -362,11 +397,11 @@
                 <!-- ═══════ TAB: Stats ═══════ -->
                 <div class="tab-content" data-tab="stats">
                     <div class="stats-header">
-                        <h2 class="tab-panel-title">📈 Session Statistics</h2>
+                        <h2 class="tab-panel-title">Session Statistics</h2>
                         <div class="stats-controls">
-                            <button id="stats-refresh-btn" class="secondary-btn">🔄 Refresh</button>
-                            <button id="stats-export-json-btn" class="secondary-btn">📋 Export JSON</button>
-                            <button id="stats-export-md-btn" class="secondary-btn">📝 Export MD</button>
+                            <button id="stats-refresh-btn" class="secondary-btn">Refresh</button>
+                            <button id="stats-export-json-btn" class="secondary-btn">Export JSON</button>
+                            <button id="stats-export-md-btn" class="secondary-btn">Export MD</button>
                         </div>
                     </div>
                     <div id="stats-content" class="stats-content">
@@ -387,7 +422,7 @@
 
                     <!-- No Manifest Notice -->
                     <div id="launch-no-manifest" class="launch-no-manifest hidden">
-                        <div class="launch-notice-icon">⚠️</div>
+                        <div class="launch-notice-icon">!</div>
                         <p>No launcher manifest found. Run <code>setup.sh</code> first to generate agent launchers.</p>
                     </div>
 
@@ -396,7 +431,7 @@
                         <!-- Masters Group -->
                         <section class="launch-group-section">
                             <div class="launch-group-header">
-                                <h2>🧠 Masters</h2>
+                                <h2>Masters</h2>
                                 <button id="launch-all-masters-btn" class="launch-all-btn">▶ Launch All Masters</button>
                             </div>
                             <div id="launch-masters-grid" class="launch-agent-grid"></div>
@@ -405,7 +440,7 @@
                         <!-- Workers Group -->
                         <section class="launch-group-section">
                             <div class="launch-group-header">
-                                <h2>👥 Workers</h2>
+                                <h2>Workers</h2>
                                 <button id="launch-all-workers-btn" class="launch-all-btn">▶ Launch All Workers</button>
                             </div>
                             <div id="launch-workers-grid" class="launch-agent-grid"></div>
@@ -415,7 +450,7 @@
                     <!-- Project App Commands (auto-detected from codebase scan) -->
                     <section id="launch-project-section" class="launch-project-section">
                         <div class="launch-project-header">
-                            <h2>🖥 Project App</h2>
+                            <h2>Project App</h2>
                             <span id="launch-project-source" class="launch-project-source"></span>
                         </div>
                         <div id="launch-project-grid" class="launch-project-grid">
@@ -425,15 +460,15 @@
 
                     <!-- Bottom Controls -->
                     <div class="launch-controls">
-                        <button id="launch-everything-btn" class="launch-everything-btn">🚀 Launch Everything</button>
+                        <button id="launch-everything-btn" class="launch-everything-btn">Launch Everything</button>
                         <div class="launch-mode-toggle">
                             <label class="mode-option">
                                 <input type="radio" name="launch-mode" value="fresh" checked />
-                                <span>🆕 Fresh</span>
+                                <span>Fresh</span>
                             </label>
                             <label class="mode-option">
                                 <input type="radio" name="launch-mode" value="continue" />
-                                <span>▶️ Continue</span>
+                                <span>Continue</span>
                             </label>
                         </div>
                         <label class="launch-merge-option">
@@ -460,9 +495,9 @@
             <!-- Debug Panel (collapsible) -->
             <div id="debug-panel" class="debug-panel hidden">
                 <div class="debug-header">
-                    <h2>🐛 Debug</h2>
+                    <h2>Debug</h2>
                     <div class="debug-controls">
-                        <button id="refresh-files-btn" class="debug-ctrl-btn">🔄</button>
+                        <button id="refresh-files-btn" class="debug-ctrl-btn">Refresh</button>
                         <label class="debug-autoscroll">
                             <input type="checkbox" id="debug-autoscroll" checked />
                             Auto
@@ -471,15 +506,15 @@
                 </div>
                 <div class="debug-content">
                     <div class="debug-section">
-                        <h3>📁 Files</h3>
+                        <h3>Files</h3>
                         <div id="files-list" class="files-list-container"></div>
                     </div>
                     <div class="debug-section">
-                        <h3>📊 State</h3>
+                        <h3>State</h3>
                         <pre id="raw-state-display" class="raw-state"></pre>
                     </div>
                     <div class="debug-section debug-log-section">
-                        <h3>📝 Log</h3>
+                        <h3>Log</h3>
                         <div id="debug-log-list" class="debug-log-list"></div>
                     </div>
                 </div>

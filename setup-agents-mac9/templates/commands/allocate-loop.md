@@ -4,6 +4,21 @@ description: Master-3's main loop. Routes Tier 3 decomposed tasks to workers, mo
 
 You are **Master-3: Allocator** running on **Sonnet**.
 
+## Bash Health Check (MUST DO FIRST)
+
+Before anything else, verify Bash works in this session:
+```bash
+echo "bash-ok"
+```
+**If the above fails** (Exit code 1, or no output), you are in **native-only mode**:
+- Use Read tool instead of `cat`
+- Use Write/Edit tools instead of heredocs
+- Use Grep/Glob instead of `find`/`grep`
+- Only use Bash for: `git`, `touch` (signals), `sleep`
+- Adapt all instructions below accordingly — replace `cat` with Read, etc.
+
+**If it succeeds**, proceed normally with Bash commands.
+
 **If this is a fresh start (post-reset), re-read your context:**
 ```bash
 cat .claude/docs/master-3-role.md
@@ -71,17 +86,36 @@ Then begin the loop.
 **Repeat these steps forever:**
 
 ### Step 1: Wait for signals (adaptive timeout)
+
+Use a single combined poll instead of multiple background watchers (avoids spawning 3 processes and `wait -n` portability issues):
 ```bash
-# Signal-first, watchdog-second:
-# - Wait on signals directly
-# - Use slower idle fallback to reduce CPU churn
-bash .claude/scripts/signal-wait.sh .claude/signals/.task-signal 20 &
-bash .claude/scripts/signal-wait.sh .claude/signals/.fix-signal 20 &
-bash .claude/scripts/signal-wait.sh .claude/signals/.completion-signal 20 &
-wait -n 2>/dev/null || true
+# Adaptive timeout: 6s if recently active, 20s if idle
+TIMEOUT=20  # Use 6 if last_activity was < 30s ago
+
+# Combined signal check: poll all three signals in one loop
+elapsed=0
+while [ "$elapsed" -lt "$TIMEOUT" ]; do
+    # Check if any signal file was touched since we last checked
+    for sig in .claude/signals/.task-signal .claude/signals/.fix-signal .claude/signals/.completion-signal; do
+        if [ -f "$sig" ]; then
+            # Signal found — break out immediately
+            elapsed=$TIMEOUT
+            break
+        fi
+    done
+    [ "$elapsed" -ge "$TIMEOUT" ] && break
+    sleep 2
+    elapsed=$((elapsed + 2))
+done
+# Clear consumed signals so we don't re-trigger
+rm -f .claude/signals/.task-signal .claude/signals/.fix-signal .claude/signals/.completion-signal 2>/dev/null || true
 ```
 
-Use 6s timeout if `last_activity` was < 30s ago. Use 20s otherwise.
+**Alternative (if Bash is healthy and fswatch/inotifywait available):**
+```bash
+bash .claude/scripts/signal-wait.sh .claude/signals/.task-signal $TIMEOUT
+```
+This watches one signal file. After waking, check the others with simple file-existence tests.
 
 `polling_cycle += 1`
 
@@ -92,9 +126,25 @@ cat .claude/state/fix-queue.json
 
 If file contains a fix task:
 1. Create the task with TaskCreate (ASSIGNED_TO the specified worker, PRIORITY: URGENT)
-2. Clear fix-queue.json
-3. Update worker-status.json with the task assignment
-4. **Launch or signal the worker:**
+2. **Write task file for the worker** (cross-session handoff):
+   ```bash
+   mkdir -p .claude/state/tasks
+   cat > .claude/state/tasks/worker-N.json << 'TASK'
+   {
+     "subject": "[fix task title]",
+     "description": "REQUEST_ID: [id]\nDOMAIN: [domain]\nASSIGNED_TO: worker-N\nFILES: [files]\nVALIDATION: tier3\nTIER: 3\nPRIORITY: URGENT\n\n[fix requirements]",
+     "domain": "[domain]",
+     "files": ["file1.js"],
+     "validation": "tier3",
+     "tier": 3,
+     "request_id": "[id]",
+     "priority": "urgent"
+   }
+   TASK
+   ```
+3. Clear fix-queue.json
+4. Update worker-status.json with the task assignment
+5. **Launch or signal the worker:**
 ```bash
 worker_status=$(jq -r '.["worker-N"].status' .claude/state/worker-status.json)
 
@@ -106,8 +156,8 @@ else
     # Log: [SIGNAL_WORKER] worker=worker-N reason=fix-task
 fi
 ```
-5. `context_budget += 30`
-6. `last_activity = now()`
+6. `context_budget += 30`
+7. `last_activity = now()`
 
 ### Step 3: Check for Tier 3 decomposed tasks from Master-2
 ```bash
@@ -120,9 +170,25 @@ If there are tasks to allocate:
 3. **Skip workers where `claimed_by` is set** — Master-2 may be doing a Tier 2 assignment
 4. Apply allocation rules (see below)
 5. Create tasks with TaskCreate, assigning to chosen workers
-6. Update worker-status.json (use lock helper)
-7. Clear processed tasks from task-queue.json
-8. **Launch or signal each assigned worker:**
+6. **Write task file for each assigned worker** (cross-session handoff — workers read this on startup):
+   ```bash
+   mkdir -p .claude/state/tasks
+   cat > .claude/state/tasks/worker-N.json << 'TASK'
+   {
+     "subject": "[task title]",
+     "description": "REQUEST_ID: [id]\nDOMAIN: [domain]\nASSIGNED_TO: worker-N\nFILES: [files]\nVALIDATION: tier3\nTIER: 3\n\n[detailed requirements]\n\n[success criteria]",
+     "domain": "[domain]",
+     "files": ["file1.js", "file2.js"],
+     "validation": "tier3",
+     "tier": 3,
+     "request_id": "[id]"
+   }
+   TASK
+   ```
+   Use the same content you passed to TaskCreate. The task file is the cross-session handoff; TaskCreate is only for your own local tracking.
+7. Update worker-status.json (use lock helper)
+8. Clear processed tasks from task-queue.json
+9. **Launch or signal each assigned worker:**
 ```bash
 worker_status=$(jq -r '.["worker-N"].status' .claude/state/worker-status.json)
 
@@ -134,9 +200,9 @@ else
     # Log: [SIGNAL_WORKER] worker=worker-N reason=tier3-task
 fi
 ```
-9. Log each allocation with reasoning
-10. `context_budget += 50 per task allocated`
-11. `last_activity = now()`
+10. Log each allocation with reasoning
+11. `context_budget += 50 per task allocated`
+12. `last_activity = now()`
 
 ### Step 4: Check worker status
 ```bash
@@ -145,11 +211,13 @@ cat .claude/state/worker-status.json
 `context_budget += 10`
 
 ### Step 5: Check for completed requests
+
+Check `worker-status.json` for workers whose status is `"completed_task"` and whose `current_task` belongs to the active request_id:
 ```bash
-TaskList()
+cat .claude/state/worker-status.json
 ```
 
-If ALL tasks for a request_id are "completed":
+Cross-reference with the task-queue.json to see how many tasks were in the request. If ALL workers assigned to a request_id show `status: "completed_task"`:
 1. Read `.claude/state/change-summaries.md` for summary of all changes
 2. Optional teammate burst (only when integration ownership is unclear): run read-only synthesis before merging
 3. Pull latest, merge PRs

@@ -12,7 +12,7 @@
 #   - Restored v7 content lost in v7→v8 rewrite (see README.md)
 #   - Fixed Tier 2 race condition with claim-before-assign protocol
 #   - Made Master-3 role doc self-contained (no "Same as v1" stubs)
-#   - Cross-platform launchers moved to setup-agents-windows9/
+#   - Cross-platform .ps1 launchers auto-generated on Windows (NTFS/WSL detection)
 #   - Restored qualitative self-monitoring alongside counter-based triggers
 #   - Restored adaptive polling within signal framework
 #   - Restored escalation paths, emergency commands, task protocol quick-ref
@@ -69,11 +69,11 @@ link_dir() {
     local link_path="$1" target_path="$2"
     rm -rf "$link_path"
     if [[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin* ]]; then
-        # Windows: convert to native paths and create NTFS junction
+        # Windows: create NTFS junction via PowerShell (cmd mklink /J is unreliable from Git Bash)
         local win_link win_target
         win_link=$(cygpath -w "$link_path" 2>/dev/null || echo "$link_path" | sed 's|/|\\|g')
         win_target=$(cd "$target_path" 2>/dev/null && cygpath -w "$(pwd)" 2>/dev/null || cygpath -w "$target_path" 2>/dev/null || echo "$target_path" | sed 's|/|\\|g')
-        cmd //c "mklink /J \"$win_link\" \"$win_target\"" > /dev/null 2>&1
+        powershell.exe -Command "New-Item -ItemType Junction -Path '$win_link' -Target '$win_target'" > /dev/null 2>&1
     else
         ln -sf "$target_path" "$link_path"
     fi
@@ -121,7 +121,7 @@ if [ ! -d "$SCRIPT_DIR/templates" ] || [ ! -d "$SCRIPT_DIR/scripts" ]; then
 fi
 
 missing=()
-for tool in git node npm gh claude; do
+for tool in git node npm gh claude jq; do
     if ! command -v "$tool" &>/dev/null; then
         missing+=("$tool")
     fi
@@ -129,7 +129,7 @@ done
 
 if [ ${#missing[@]} -gt 0 ]; then
     fail "Missing: ${missing[*]}"
-    echo "   brew install git node gh"
+    echo "   brew install git node gh jq"
     echo "   npm install -g @anthropic-ai/claude-code"
     exit 1
 fi
@@ -254,9 +254,11 @@ ok "$worker_count workers, can scale to $MAX_WORKERS"
 # ============================================================================
 step "Creating directories..."
 
-mkdir -p .claude/agents .claude/commands .claude/hooks .claude/scripts .claude/state
-mkdir -p .claude/signals
-mkdir -p .claude/knowledge/domain
+mkdir -p .claude/agents .claude/commands .claude/hooks .claude/scripts .claude/signals
+mkdir -p .claude/knowledge/domain .claude/state/tasks
+# .claude/state may be a stale symlink/file/junction from a prior run — clean it first
+if [ -e .claude/state ] && [ ! -d .claude/state ]; then rm -f .claude/state; fi
+mkdir -p .claude/state
 
 for ignore_entry in '.worktrees/' '.claude-shared-state/' '.claude/logs/' '.claude/signals/'; do
     if ! grep -qF "$ignore_entry" .gitignore 2>/dev/null; then
@@ -462,7 +464,7 @@ ok "Orchestration files committed to $default_branch"
 step "Setting up shared state directory..."
 
 shared_state_dir="$project_path/.claude-shared-state"
-mkdir -p "$shared_state_dir"
+mkdir -p "$shared_state_dir" "$shared_state_dir/tasks"
 
 if [ -L ".claude/state" ]; then
     rm -f .claude/state
@@ -624,6 +626,88 @@ LAUNCHER
 done
 
 ok "Continue-mode launcher scripts written"
+
+# ── Windows .ps1 launcher wrappers (WSL passthrough) ─────────────────
+if [[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin* ]]; then
+    step "Generating Windows .ps1 launcher wrappers..."
+
+    # Convert Windows path to WSL path for use inside wsl.exe
+    # Try wslpath first, fall back to manual conversion
+    if command -v wslpath &>/dev/null; then
+        wsl_launcher_dir=$(wslpath -u "$launcher_dir" 2>/dev/null || echo "$launcher_dir")
+        wsl_project_path=$(wslpath -u "$project_path" 2>/dev/null || echo "$project_path")
+    else
+        # Manual conversion: C:\Users\Owner\Desktop\X -> /home/owner/Desktop/X
+        # or /mnt/c/Users/Owner/Desktop/X depending on WSL config
+        # Use wsl.exe to convert the path at runtime
+        wsl_launcher_dir=$(wsl.exe wslpath -u "$(cygpath -w "$launcher_dir")" 2>/dev/null | tr -d '\r' || echo "$launcher_dir")
+        wsl_project_path=$(wsl.exe wslpath -u "$(cygpath -w "$project_path")" 2>/dev/null | tr -d '\r' || echo "$project_path")
+    fi
+
+    # Fresh-start .ps1 wrappers
+    printf '%s\r\n' \
+        "# DO NOT add non-ASCII chars or inline bash -lc strings. PowerShell 5.1 reads without UTF-8 BOM." \
+        "Clear-Host" \
+        "Write-Host \"  I AM MASTER-2 -- ARCHITECT (Opus)\" -ForegroundColor Cyan" \
+        "wsl.exe bash -l $wsl_launcher_dir/master-2.sh" \
+        > "$launcher_dir/master-2.ps1"
+
+    printf '%s\r\n' \
+        "# DO NOT add non-ASCII chars or inline bash -lc strings. PowerShell 5.1 reads without UTF-8 BOM." \
+        "Clear-Host" \
+        "Write-Host \"  I AM MASTER-3 -- ALLOCATOR (Sonnet)\" -ForegroundColor Yellow" \
+        "wsl.exe bash -l $wsl_launcher_dir/master-3.sh" \
+        > "$launcher_dir/master-3.ps1"
+
+    printf '%s\r\n' \
+        "# DO NOT add non-ASCII chars or inline bash -lc strings. PowerShell 5.1 reads without UTF-8 BOM." \
+        "Clear-Host" \
+        "Write-Host \"  I AM MASTER-1 -- YOUR INTERFACE (Sonnet)\" -ForegroundColor Cyan" \
+        "wsl.exe bash -l $wsl_launcher_dir/master-1.sh" \
+        > "$launcher_dir/master-1.ps1"
+
+    for i in $(seq 1 $worker_count); do
+        printf '%s\r\n' \
+            "# DO NOT add non-ASCII chars or inline bash -lc strings. PowerShell 5.1 reads without UTF-8 BOM." \
+            "Clear-Host" \
+            "Write-Host \"  I AM WORKER-$i (Opus)\" -ForegroundColor Green" \
+            "wsl.exe bash -l $wsl_launcher_dir/worker-$i.sh" \
+            > "$launcher_dir/worker-$i.ps1"
+    done
+
+    # Continue-mode .ps1 wrappers
+    printf '%s\r\n' \
+        "# DO NOT add non-ASCII chars or inline bash -lc strings. PowerShell 5.1 reads without UTF-8 BOM." \
+        "Clear-Host" \
+        "Write-Host \"  I AM MASTER-2 -- ARCHITECT (Opus) [CONTINUE]\" -ForegroundColor Cyan" \
+        "wsl.exe bash -l $wsl_launcher_dir/master-2-continue.sh" \
+        > "$launcher_dir/master-2-continue.ps1"
+
+    printf '%s\r\n' \
+        "# DO NOT add non-ASCII chars or inline bash -lc strings. PowerShell 5.1 reads without UTF-8 BOM." \
+        "Clear-Host" \
+        "Write-Host \"  I AM MASTER-3 -- ALLOCATOR (Sonnet) [CONTINUE]\" -ForegroundColor Yellow" \
+        "wsl.exe bash -l $wsl_launcher_dir/master-3-continue.sh" \
+        > "$launcher_dir/master-3-continue.ps1"
+
+    printf '%s\r\n' \
+        "# DO NOT add non-ASCII chars or inline bash -lc strings. PowerShell 5.1 reads without UTF-8 BOM." \
+        "Clear-Host" \
+        "Write-Host \"  I AM MASTER-1 -- YOUR INTERFACE (Sonnet) [CONTINUE]\" -ForegroundColor Cyan" \
+        "wsl.exe bash -l $wsl_launcher_dir/master-1-continue.sh" \
+        > "$launcher_dir/master-1-continue.ps1"
+
+    for i in $(seq 1 $worker_count); do
+        printf '%s\r\n' \
+            "# DO NOT add non-ASCII chars or inline bash -lc strings. PowerShell 5.1 reads without UTF-8 BOM." \
+            "Clear-Host" \
+            "Write-Host \"  I AM WORKER-$i (Opus) [CONTINUE]\" -ForegroundColor Green" \
+            "wsl.exe bash -l $wsl_launcher_dir/worker-$i-continue.sh" \
+            > "$launcher_dir/worker-$i-continue.ps1"
+    done
+
+    ok "Windows .ps1 launcher wrappers generated"
+fi
 
 # ── Generate manifest.json for GUI ───────────────────────────────────
 cat > "$launcher_dir/manifest.json" << MANIFEST
@@ -816,9 +900,11 @@ HEALTH
         w_suffix=""
     fi
 
-    # ── Terminal creation (macOS) ─────────────────────────────────────
-    merge_visible_windows() {
-        osascript << 'MERGE_SCRIPT'
+    # ── Platform-specific terminal creation ───────────────────────────
+    if [[ "$OSTYPE" == darwin* ]]; then
+        # ── macOS: use osascript + Terminal.app ──────────────────────
+        merge_visible_windows() {
+            osascript << 'MERGE_SCRIPT'
 tell application "Terminal" to activate
 delay 0.5
 tell application "System Events"
@@ -827,55 +913,113 @@ tell application "System Events"
     end tell
 end tell
 MERGE_SCRIPT
-    }
+        }
 
-    step "  Preparing setup window..."
-    SETUP_WIN_ID=$(osascript -e 'tell application "Terminal" to return id of front window')
-    osascript -e "tell application \"Terminal\" to set miniaturized of window id $SETUP_WIN_ID to true"
-    sleep 1
-    ok "  Setup window minimized (ID: $SETUP_WIN_ID)"
+        step "  Preparing setup window..."
+        SETUP_WIN_ID=$(osascript -e 'tell application "Terminal" to return id of front window')
+        osascript -e "tell application \"Terminal\" to set miniaturized of window id $SETUP_WIN_ID to true"
+        sleep 1
+        ok "  Setup window minimized (ID: $SETUP_WIN_ID)"
 
-    step "  Creating master windows..."
+        step "  Creating master windows..."
 
-    osascript -e "tell application \"Terminal\"
-        activate
-        do script \"$m2_launcher\"
-    end tell"
-    sleep 2
+        osascript -e "tell application \"Terminal\"
+            activate
+            do script \"$m2_launcher\"
+        end tell"
+        sleep 2
 
-    osascript -e "tell application \"Terminal\"
-        do script \"$m3_launcher\"
-    end tell"
-    sleep 2
+        osascript -e "tell application \"Terminal\"
+            do script \"$m3_launcher\"
+        end tell"
+        sleep 2
 
-    osascript -e "tell application \"Terminal\"
-        do script \"$m1_launcher\"
-    end tell"
-    sleep 2
+        osascript -e "tell application \"Terminal\"
+            do script \"$m1_launcher\"
+        end tell"
+        sleep 2
 
-    ok "  3 master windows created"
+        ok "  3 master windows created"
 
-    step "  Merging masters into tabs..."
-    merge_visible_windows
-    sleep 2
+        step "  Merging masters into tabs..."
+        merge_visible_windows
+        sleep 2
 
-    MASTER_WIN_ID=$(osascript -e 'tell application "Terminal" to return id of front window')
-    MASTER_TAB_COUNT=$(osascript -e "tell application \"Terminal\" to return count of tabs of window id $MASTER_WIN_ID")
-    ok "  Masters merged: $MASTER_TAB_COUNT tabs in window $MASTER_WIN_ID"
+        MASTER_WIN_ID=$(osascript -e 'tell application "Terminal" to return id of front window')
+        MASTER_TAB_COUNT=$(osascript -e "tell application \"Terminal\" to return count of tabs of window id $MASTER_WIN_ID")
+        ok "  Masters merged: $MASTER_TAB_COUNT tabs in window $MASTER_WIN_ID"
 
-    osascript -e "tell application \"Terminal\" to set miniaturized of window id $MASTER_WIN_ID to true"
-    sleep 1
+        osascript -e "tell application \"Terminal\" to set miniaturized of window id $MASTER_WIN_ID to true"
+        sleep 1
 
-    # Workers are NOT launched at startup — they launch ON DEMAND when tasks are assigned
-    ok "  Workers will launch ON DEMAND when tasks are assigned ($worker_count worktrees ready)"
+        ok "  Workers will launch ON DEMAND when tasks are assigned ($worker_count worktrees ready)"
 
-    step "  Restoring windows..."
-    osascript -e "tell application \"Terminal\"
-        set miniaturized of window id $MASTER_WIN_ID to false
-        set miniaturized of window id $SETUP_WIN_ID to false
-    end tell" 2>/dev/null || true
-    sleep 1
-    ok "  All windows restored"
+        step "  Restoring windows..."
+        osascript -e "tell application \"Terminal\"
+            set miniaturized of window id $MASTER_WIN_ID to false
+            set miniaturized of window id $SETUP_WIN_ID to false
+        end tell" 2>/dev/null || true
+        sleep 1
+        ok "  All windows restored"
+
+    elif [[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin* ]]; then
+        # ── Windows: use Windows Terminal (wt.exe) or cmd start ──────
+        step "  Launching master terminals..."
+
+        # Convert Unix launcher paths to Windows paths for wt.exe/start
+        win_m2_launcher=$(cygpath -w "$m2_launcher" 2>/dev/null || echo "$m2_launcher" | sed 's|/|\\|g')
+        win_m3_launcher=$(cygpath -w "$m3_launcher" 2>/dev/null || echo "$m3_launcher" | sed 's|/|\\|g')
+        win_m1_launcher=$(cygpath -w "$m1_launcher" 2>/dev/null || echo "$m1_launcher" | sed 's|/|\\|g')
+
+        if command -v wt.exe &>/dev/null; then
+            # Windows Terminal: open all masters as tabs in one window
+            wt.exe new-tab --title "Master-2 Architect" bash "$m2_launcher" \; \
+                   new-tab --title "Master-3 Allocator" bash "$m3_launcher" \; \
+                   new-tab --title "Master-1 Interface" bash "$m1_launcher" &
+            sleep 3
+            ok "  3 master tabs opened in Windows Terminal"
+        else
+            # Fallback: use cmd start to open separate Git Bash windows
+            start bash "$m2_launcher" &
+            sleep 1
+            start bash "$m3_launcher" &
+            sleep 1
+            start bash "$m1_launcher" &
+            sleep 1
+            ok "  3 master windows opened (separate Git Bash windows)"
+        fi
+
+        ok "  Workers will launch ON DEMAND when tasks are assigned ($worker_count worktrees ready)"
+
+    else
+        # ── Linux: try common terminal emulators ─────────────────────
+        step "  Launching master terminals..."
+
+        launch_in_terminal() {
+            local title="$1" script="$2"
+            if command -v gnome-terminal &>/dev/null; then
+                gnome-terminal --title="$title" -- bash "$script" &
+            elif command -v konsole &>/dev/null; then
+                konsole --new-tab -e bash "$script" &
+            elif command -v xterm &>/dev/null; then
+                xterm -title "$title" -e bash "$script" &
+            elif command -v xfce4-terminal &>/dev/null; then
+                xfce4-terminal --title="$title" -e "bash $script" &
+            else
+                echo "   WARN: No supported terminal emulator found. Run manually: $script" >&2
+            fi
+        }
+
+        launch_in_terminal "Master-2 Architect" "$m2_launcher"
+        sleep 1
+        launch_in_terminal "Master-3 Allocator" "$m3_launcher"
+        sleep 1
+        launch_in_terminal "Master-1 Interface" "$m1_launcher"
+        sleep 1
+
+        ok "  3 master terminals launched"
+        ok "  Workers will launch ON DEMAND when tasks are assigned ($worker_count worktrees ready)"
+    fi
 
     echo ""
     echo -e "${GREEN}========================================${NC}"

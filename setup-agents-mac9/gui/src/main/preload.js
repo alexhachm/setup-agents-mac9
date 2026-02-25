@@ -50,6 +50,10 @@ contextBridge.exposeInMainWorld('electron', {
     listProjects: () => ipcRenderer.invoke('list-projects'),
     removeProject: (path) => ipcRenderer.invoke('remove-project', path),
 
+    // File tree API
+    getFileTree: (depth) => ipcRenderer.invoke('get-file-tree', depth),
+    readFileContent: (relativePath) => ipcRenderer.invoke('read-file-content', relativePath),
+
     // Setup APIs (GUI-first flow)
     runSetup: (opts) => ipcRenderer.invoke('run-setup', opts),
     getRecentProjects: () => ipcRenderer.invoke('get-recent-projects'),

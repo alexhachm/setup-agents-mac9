@@ -22,6 +22,10 @@ let knowledgeWatcher = null;
 let signalWatcher = null;
 let projectPath = null;
 
+// Debounce map for state-changed IPC events
+const stateDebounceTimers = new Map();
+const STATE_DEBOUNCE_MS = 250;
+
 // ═══════════════════════════════════════════════════════════════════════════
 // DEBUG LOGGING SYSTEM
 // ═══════════════════════════════════════════════════════════════════════════
@@ -373,6 +377,40 @@ ipcMain.handle('get-timeline', async (event, requestId) => {
     }
 });
 
+// Scan activity log tail to find last timestamp per agent
+function getAgentLastActivity() {
+    const result = {};
+    const logPath = getLogPath();
+    if (!logPath || !fs.existsSync(logPath)) return result;
+
+    try {
+        // Read last ~16KB for efficiency (covers ~200 recent lines)
+        const stat = fs.statSync(logPath);
+        const readSize = Math.min(stat.size, 16384);
+        const fd = fs.openSync(logPath, 'r');
+        const buffer = Buffer.alloc(readSize);
+        fs.readSync(fd, buffer, 0, readSize, Math.max(0, stat.size - readSize));
+        fs.closeSync(fd);
+
+        const lines = buffer.toString('utf-8').split('\n');
+        for (let i = lines.length - 1; i >= 0; i--) {
+            const match = lines[i].match(
+                /\[(\d{4}-\d{2}-\d{2}T[\d:]+Z?)\]\s+\[([^\]]+)\]/
+            );
+            if (match) {
+                const [, timestamp, agent] = match;
+                if (!result[agent]) {
+                    result[agent] = new Date(timestamp).getTime();
+                }
+            }
+        }
+    } catch (e) {
+        debug('HEALTH', 'Error reading activity log for staleness', { error: e.message });
+    }
+
+    return result;
+}
+
 ipcMain.handle('get-agent-health', async () => {
     const filePath = getStatePath('agent-health.json');
     if (!filePath) return null;
@@ -380,25 +418,111 @@ ipcMain.handle('get-agent-health', async () => {
         const content = fs.readFileSync(filePath, 'utf-8');
         const health = JSON.parse(content);
 
-        // Enrich with computed fields
+        // File-level staleness
+        const fileStat = fs.statSync(filePath);
+        const fileAgeMinutes = Math.floor((Date.now() - fileStat.mtime.getTime()) / 60000);
+        health._fileAgeMinutes = fileAgeMinutes;
+        health._fileLastModified = fileStat.mtime.toISOString();
+
+        // Per-agent last activity from log
+        const agentLastActivity = getAgentLastActivity();
+
+        // Master-2 enrichment
         if (health['master-2']) {
             const m2 = health['master-2'];
             m2.tier1_remaining = 4 - (m2.tier1_count || 0);
             m2.decomp_remaining = 6 - (m2.decomposition_count || 0);
             m2.resetImminent = m2.tier1_remaining <= 1 || m2.decomp_remaining <= 1;
+
+            // Effective status: M2 has no heartbeat, use activity log + file mtime
+            const m2LastMs = agentLastActivity['master-2'];
+            const m2AgeSec = m2LastMs ? Math.floor((Date.now() - m2LastMs) / 1000) : null;
+            if (m2.status === 'active') {
+                if (m2AgeSec !== null && m2AgeSec > 3600) {
+                    m2.effectiveStatus = 'stopped';
+                } else if (m2AgeSec === null && fileAgeMinutes > 60) {
+                    m2.effectiveStatus = 'stopped';
+                } else if (m2AgeSec !== null && m2AgeSec > 1800) {
+                    m2.effectiveStatus = 'stale';
+                } else if (m2AgeSec === null && fileAgeMinutes > 30) {
+                    m2.effectiveStatus = 'stale';
+                } else {
+                    m2.effectiveStatus = 'active';
+                }
+            } else {
+                m2.effectiveStatus = m2.status || 'unknown';
+            }
+            m2._lastActivitySec = m2AgeSec;
         }
+
+        // Master-3 enrichment
         if (health['master-3']) {
             const m3 = health['master-3'];
             if (m3.started_at) {
-                m3.uptimeMinutes = Math.floor((Date.now() - new Date(m3.started_at).getTime()) / 60000);
-                m3.resetImminent = m3.uptimeMinutes >= 18 || (m3.context_budget || 0) >= 4500;
+                const uptimeMs = Date.now() - new Date(m3.started_at).getTime();
+                m3.uptimeMinutes = Math.floor(uptimeMs / 60000);
+
+                if (m3.status === 'active') {
+                    if (m3.uptimeMinutes > 60) {
+                        m3.effectiveStatus = 'stopped';
+                    } else if (m3.uptimeMinutes > 30) {
+                        m3.effectiveStatus = 'stale';
+                    } else {
+                        m3.effectiveStatus = 'active';
+                    }
+                } else {
+                    m3.effectiveStatus = m3.status || 'unknown';
+                }
+
+                // Only show resetImminent if actually running
+                m3.resetImminent = m3.effectiveStatus === 'active' &&
+                    (m3.uptimeMinutes >= 18 || (m3.context_budget || 0) >= 4500);
+            } else {
+                m3.effectiveStatus = m3.status || 'unknown';
             }
             m3.budgetPercent = Math.min(100, Math.floor(((m3.context_budget || 0) / 5000) * 100));
+
+            // Also check activity log for M3
+            const m3LastMs = agentLastActivity['master-3'];
+            const m3AgeSec = m3LastMs ? Math.floor((Date.now() - m3LastMs) / 1000) : null;
+            m3._lastActivitySec = m3AgeSec;
+            // If activity log says M3 hasn't logged in 60+ min, override
+            if (m3.effectiveStatus === 'active' && m3AgeSec !== null && m3AgeSec > 3600) {
+                m3.effectiveStatus = 'stopped';
+            } else if (m3.effectiveStatus === 'active' && m3AgeSec !== null && m3AgeSec > 1800) {
+                m3.effectiveStatus = 'stale';
+            }
         }
+
+        // Worker enrichment
         if (health.workers) {
             for (const [id, w] of Object.entries(health.workers)) {
                 w.budgetPercent = Math.min(100, Math.floor(((w.context_budget || 0) / 8000) * 100));
                 w.resetImminent = w.budgetPercent >= 90 || (w.tasks_completed || 0) >= 5;
+
+                // Effective status based on heartbeat
+                const hbAgeMs = w.last_heartbeat ? Date.now() - new Date(w.last_heartbeat).getTime() : null;
+                const hbAgeSec = hbAgeMs !== null ? Math.floor(hbAgeMs / 1000) : null;
+                w._heartbeatAgeSec = hbAgeSec;
+
+                if (w.status === 'busy' || w.status === 'running') {
+                    if (hbAgeSec !== null && hbAgeSec > 300) {
+                        w.effectiveStatus = 'stopped';
+                    } else if (hbAgeSec !== null && hbAgeSec > 90) {
+                        w.effectiveStatus = 'dead';
+                    } else {
+                        w.effectiveStatus = w.status;
+                    }
+                } else if (w.status === 'assigned') {
+                    // Assigned but no heartbeat for >5 min means it never started
+                    if (hbAgeSec !== null && hbAgeSec > 300) {
+                        w.effectiveStatus = 'stopped';
+                    } else {
+                        w.effectiveStatus = w.status;
+                    }
+                } else {
+                    w.effectiveStatus = w.status || 'idle';
+                }
             }
         }
 
@@ -469,6 +593,75 @@ ipcMain.handle('get-signals', async () => {
             });
     } catch (e) {
         return [];
+    }
+});
+
+// === File Tree IPC Handler ===
+
+ipcMain.handle('get-file-tree', async (event, depth = 3) => {
+    if (!projectPath) return null;
+
+    const IGNORE = new Set([
+        '.git', 'node_modules', '.claude-shared-state', '__pycache__',
+        '.next', 'dist', 'build', '.cache', 'coverage', '.venv', 'venv',
+        '.tox', '.mypy_cache', '.pytest_cache', '.DS_Store', 'Thumbs.db'
+    ]);
+
+    async function readTree(dir, currentDepth) {
+        if (currentDepth >= depth) return [];
+        try {
+            const entries = await fs.promises.readdir(dir, { withFileTypes: true });
+            const filtered = entries
+                .filter(e => !IGNORE.has(e.name) && !e.name.startsWith('.claude-shared'))
+                .sort((a, b) => {
+                    if (a.isDirectory() !== b.isDirectory()) return a.isDirectory() ? -1 : 1;
+                    return a.name.localeCompare(b.name);
+                });
+            const results = [];
+            for (const e of filtered) {
+                const fullPath = path.join(dir, e.name);
+                const relativePath = path.relative(projectPath, fullPath).replace(/\\/g, '/');
+                if (e.isDirectory()) {
+                    results.push({ name: e.name, path: relativePath, type: 'directory', children: await readTree(fullPath, currentDepth + 1) });
+                } else {
+                    try {
+                        const stat = await fs.promises.stat(fullPath);
+                        results.push({ name: e.name, path: relativePath, type: 'file', size: stat.size });
+                    } catch (_) {
+                        results.push({ name: e.name, path: relativePath, type: 'file', size: 0 });
+                    }
+                }
+            }
+            return results;
+        } catch (_) { return []; }
+    }
+
+    return { name: path.basename(projectPath), path: '', type: 'directory', children: await readTree(projectPath, 0) };
+});
+
+// === Read File Content IPC Handler (for file viewer) ===
+
+ipcMain.handle('read-file-content', async (event, relativePath) => {
+    if (!projectPath) return { error: 'No project selected' };
+    const fullPath = path.resolve(projectPath, relativePath);
+    // Security: path must stay within project directory
+    if (!fullPath.startsWith(path.resolve(projectPath))) {
+        return { error: 'Path outside project directory' };
+    }
+    try {
+        const stat = await fs.promises.stat(fullPath);
+        const MAX_SIZE = 512 * 1024; // 512KB
+        if (stat.size > MAX_SIZE) {
+            const fd = await fs.promises.open(fullPath, 'r');
+            const buffer = Buffer.alloc(MAX_SIZE);
+            await fd.read(buffer, 0, MAX_SIZE, 0);
+            await fd.close();
+            return { content: buffer.toString('utf-8'), truncated: true, size: stat.size };
+        }
+        const content = await fs.promises.readFile(fullPath, 'utf-8');
+        return { content, truncated: false, size: stat.size };
+    } catch (e) {
+        return { error: e.message };
     }
 });
 
@@ -627,9 +820,10 @@ ipcMain.handle('launch-agent', async (event, { agentId, projectPath: pp, continu
                 : path.join(launcherDir, `${agent.id}${suffix}.bat`);
 
             if (fs.existsSync(ps1File)) {
-                terminalCmd = `where wt >nul 2>nul && wt new-tab -d "${cwd}" --title ${agent.id} powershell.exe -ExecutionPolicy Bypass -File "${ps1File}" || start powershell.exe -ExecutionPolicy Bypass -File "${ps1File}"`;
+                // ps1 launchers handle their own `cd` via wsl.exe internally — no -d needed
+                terminalCmd = `where wt >nul 2>nul && wt new-tab --title ${agent.id} powershell.exe -ExecutionPolicy Bypass -File "${ps1File}" || start powershell.exe -ExecutionPolicy Bypass -File "${ps1File}"`;
             } else if (fs.existsSync(batFile)) {
-                terminalCmd = `where wt >nul 2>nul && wt new-tab -d "${cwd}" --title ${agent.id} cmd /k "${batFile}" || start cmd /k "${batFile}"`;
+                terminalCmd = `where wt >nul 2>nul && wt new-tab --title ${agent.id} cmd /k "${batFile}" || start cmd /k "${batFile}"`;
             } else {
                 const winCmd = command.replace(/'/g, '"');
                 terminalCmd = `where wt >nul 2>nul && wt new-tab -d "${cwd}" --title ${agent.id} cmd /k "${winCmd}" || start cmd /k "cd /d ${cwd} && ${winCmd}"`;
@@ -704,9 +898,9 @@ ipcMain.handle('launch-group', async (event, { group, projectPath: pp, continueM
             const batFile = path.join(launcherDir, `${agent.id}${suffix}.bat`);
 
             if (fs.existsSync(ps1File)) {
-                terminalCmd = `where wt >nul 2>nul && wt new-tab -d "${cwd}" --title ${agent.id} powershell.exe -ExecutionPolicy Bypass -File "${ps1File}" || start powershell.exe -ExecutionPolicy Bypass -File "${ps1File}"`;
+                terminalCmd = `where wt >nul 2>nul && wt new-tab --title ${agent.id} powershell.exe -ExecutionPolicy Bypass -File "${ps1File}" || start powershell.exe -ExecutionPolicy Bypass -File "${ps1File}"`;
             } else if (fs.existsSync(batFile)) {
-                terminalCmd = `where wt >nul 2>nul && wt new-tab -d "${cwd}" --title ${agent.id} cmd /k "${batFile}" || start cmd /k "${batFile}"`;
+                terminalCmd = `where wt >nul 2>nul && wt new-tab --title ${agent.id} cmd /k "${batFile}" || start cmd /k "${batFile}"`;
             } else {
                 const winCmd = command.replace(/'/g, '"');
                 terminalCmd = `where wt >nul 2>nul && wt new-tab -d "${cwd}" --title ${agent.id} cmd /k "${winCmd}" || start cmd /k "cd /d ${cwd} && ${winCmd}"`;
@@ -764,6 +958,7 @@ ipcMain.handle('launch-group-tabbed-wt', async (event, { group, projectPath: pp,
     if (agents.length === 0) return { success: false, error: 'No agents in group' };
 
     // Build a single Windows Terminal command with multiple tabs using .ps1 launchers
+    // ps1 launchers handle their own `cd` via wsl.exe — no -d needed (avoids WSL UNC path errors)
     const tabArgs = agents.map((agent, i) => {
         const launcherDir = path.join(pp, '.claude', 'launchers');
         const suffix = continueMode ? '-continue' : '';
@@ -771,7 +966,7 @@ ipcMain.handle('launch-group-tabbed-wt', async (event, { group, projectPath: pp,
         const prefix = i === 0 ? '' : '; new-tab';
 
         if (fs.existsSync(ps1File)) {
-            return `${prefix} -d "${agent.cwd}" --title ${agent.id} powershell.exe -ExecutionPolicy Bypass -File "${ps1File}"`;
+            return `${prefix} --title ${agent.id} powershell.exe -ExecutionPolicy Bypass -File "${ps1File}"`;
         } else {
             const cmd = continueMode ? agent.command_continue : agent.command_fresh;
             const winCmd = cmd.replace(/'/g, '"');
@@ -819,7 +1014,7 @@ ipcMain.handle('launch-all-tabbed-wt', async (event, { projectPath: pp, continue
         const prefix = i === 0 ? '' : '; new-tab';
 
         if (fs.existsSync(ps1File)) {
-            return `${prefix} -d "${agent.cwd}" --title ${agent.id} powershell.exe -ExecutionPolicy Bypass -File "${ps1File}"`;
+            return `${prefix} --title ${agent.id} powershell.exe -ExecutionPolicy Bypass -File "${ps1File}"`;
         } else {
             const cmd = continueMode ? agent.command_continue : agent.command_fresh;
             const winCmd = cmd.replace(/'/g, '"');
@@ -1020,7 +1215,14 @@ function startWatching() {
     stateWatcher.on('change', (filePath) => {
         const filename = path.basename(filePath);
         debug('WATCH', 'State file changed', { filename, filePath });
-        mainWindow?.webContents.send('state-changed', filename);
+        // Debounce: coalesce rapid-fire changes into single IPC events
+        if (stateDebounceTimers.has(filename)) {
+            clearTimeout(stateDebounceTimers.get(filename));
+        }
+        stateDebounceTimers.set(filename, setTimeout(() => {
+            stateDebounceTimers.delete(filename);
+            mainWindow?.webContents.send('state-changed', filename);
+        }, STATE_DEBOUNCE_MS));
     });
 
     stateWatcher.on('add', (filePath) => {
