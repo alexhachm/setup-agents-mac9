@@ -13,7 +13,18 @@ const path = require('path');
 const fs = require('fs');
 const chokidar = require('chokidar');
 const os = require('os');
-const { exec, spawn } = require('child_process');
+const { exec, spawn, execSync } = require('child_process');
+
+// Detect WSL: process.platform is 'linux' but we're actually inside Windows Subsystem for Linux
+const isWSL = (() => {
+    if (process.platform !== 'linux') return false;
+    try {
+        const release = fs.readFileSync('/proc/version', 'utf-8');
+        return /microsoft/i.test(release);
+    } catch {
+        return false;
+    }
+})();
 
 let mainWindow = null;
 let stateWatcher = null;
@@ -643,6 +654,32 @@ ipcMain.handle('launch-agent', async (event, { agentId, projectPath: pp, continu
                 terminalCmd = `where wt >nul 2>nul && wt new-tab -d "${cwd}" --title ${agent.id} cmd /k "${winCmd}" || start cmd /k "cd /d ${cwd} && ${winCmd}"`;
             }
 
+        } else if (isWSL) {
+            // WSL: use .sh launchers via wt.exe, fall back to .ps1 launchers
+            const launcherDir = path.join(pp, '.claude', 'launchers');
+            const suffix = continueMode ? '-continue' : '';
+            const shField = continueMode ? (agent.launcher_sh_continue || agent.launcher_sh) : agent.launcher_sh;
+            const defaultSh = path.join(launcherDir, `${agent.id}${suffix}.sh`);
+            const shFile = resolveManifestPath(pp, shField, defaultSh);
+
+            if (fs.existsSync(shFile)) {
+                terminalCmd = `wt.exe new-tab --title ${agent.id} wsl.exe bash "${shFile}"`;
+            } else {
+                // Fall back to .ps1 launcher via wt.exe → powershell
+                const ps1Field = continueMode ? (agent.launcher_ps1_continue || agent.launcher_ps1) : agent.launcher_ps1;
+                const defaultPs1 = path.join(launcherDir, `${agent.id}${suffix}.ps1`);
+                const ps1File = resolveManifestPath(pp, ps1Field, defaultPs1);
+                if (fs.existsSync(ps1File)) {
+                    let winPs1;
+                    try { winPs1 = execSync(`wslpath -w "${ps1File}"`).toString().trim(); } catch { winPs1 = ps1File; }
+                    terminalCmd = `wt.exe new-tab --title ${agent.id} powershell.exe -ExecutionPolicy Bypass -File "${winPs1}"`;
+                } else {
+                    // Last resort: inline command
+                    const escaped = command.replace(/'/g, "'\\''");
+                    terminalCmd = `wt.exe new-tab --title ${agent.id} wsl.exe bash -lc '${escaped}'`;
+                }
+            }
+
         } else {
             // Linux: try common terminal emulators
             const linuxCmd = `cd '${cwd}' && ${command}`;
@@ -722,6 +759,20 @@ ipcMain.handle('launch-group', async (event, { group, projectPath: pp, continueM
                 const winCmd = command.replace(/'/g, '"');
                 terminalCmd = `where wt >nul 2>nul && wt new-tab -d "${cwd}" --title ${agent.id} cmd /k "${winCmd}" || start cmd /k "cd /d ${cwd} && ${winCmd}"`;
             }
+        } else if (isWSL) {
+            // WSL: use wt.exe to open Windows Terminal tabs running the .sh launcher
+            const launcherDir = path.join(pp, '.claude', 'launchers');
+            const suffix = continueMode ? '-continue' : '';
+            const shField = continueMode ? (agent.launcher_sh_continue || agent.launcher_sh) : agent.launcher_sh;
+            const defaultSh = path.join(launcherDir, `${agent.id}${suffix}.sh`);
+            const shFile = resolveManifestPath(pp, shField, defaultSh);
+
+            if (fs.existsSync(shFile)) {
+                terminalCmd = `wt.exe new-tab --title ${agent.id} wsl.exe bash "${shFile}"`;
+            } else {
+                const escaped = command.replace(/'/g, "'\\''");
+                terminalCmd = `wt.exe new-tab --title ${agent.id} wsl.exe bash -lc '${escaped}'`;
+            }
         } else {
             const linuxCmd = `cd '${cwd}' && ${command}`;
             terminalCmd = `which gnome-terminal >/dev/null 2>&1 && gnome-terminal -- bash -c '${linuxCmd}; exec bash' || `
@@ -758,9 +809,9 @@ ipcMain.handle('merge-terminal-windows', async () => {
     }
 });
 
-// Windows-specific: launch group as tabs in Windows Terminal
+// Windows/WSL: launch group as tabs in Windows Terminal
 ipcMain.handle('launch-group-tabbed-wt', async (event, { group, projectPath: pp, continueMode }) => {
-    if (process.platform !== 'win32') return { success: false, error: 'Windows only' };
+    if (process.platform !== 'win32' && !isWSL) return { success: false, error: 'Windows/WSL only' };
     pp = pp || projectPath;
 
     const manifestPath = path.join(pp, '.claude', 'launchers', 'manifest.json');
@@ -774,31 +825,49 @@ ipcMain.handle('launch-group-tabbed-wt', async (event, { group, projectPath: pp,
     const agents = manifest.agents.filter(a => a.group === group);
     if (agents.length === 0) return { success: false, error: 'No agents in group' };
 
-    // Build a single Windows Terminal command with multiple tabs using .ps1 launchers
+    // Build a single Windows Terminal command with multiple tabs
+    const wtExe = isWSL ? 'wt.exe' : 'wt';
     const tabArgs = agents.map((agent, i) => {
         const launcherDir = path.join(pp, '.claude', 'launchers');
         const suffix = continueMode ? '-continue' : '';
-        const defaultPs1 = path.join(launcherDir, `${agent.id}${suffix}.ps1`);
-        const defaultBat = path.join(launcherDir, `${agent.id}${suffix}.bat`);
-        const ps1Field = continueMode ? (agent.launcher_ps1_continue || agent.launcher_ps1) : agent.launcher_ps1;
-        const batField = continueMode ? (agent.launcher_win_continue || agent.launcher_win) : agent.launcher_win;
-        const ps1File = resolveManifestPath(pp, ps1Field, defaultPs1);
-        const batFile = resolveManifestPath(pp, batField, defaultBat);
         const prefix = i === 0 ? '' : '; new-tab';
 
-        if (fs.existsSync(ps1File)) {
-            return `${prefix} -d "${agent.cwd}" --title ${agent.id} powershell.exe -ExecutionPolicy Bypass -File "${ps1File}"`;
-        } else if (fs.existsSync(batFile)) {
-            return `${prefix} -d "${agent.cwd}" --title ${agent.id} cmd /k "${batFile}"`;
+        if (isWSL) {
+            // WSL: use .sh launchers via wsl.exe bash
+            const shField = continueMode ? (agent.launcher_sh_continue || agent.launcher_sh) : agent.launcher_sh;
+            const defaultSh = path.join(launcherDir, `${agent.id}${suffix}.sh`);
+            const shFile = resolveManifestPath(pp, shField, defaultSh);
+
+            if (fs.existsSync(shFile)) {
+                return `${prefix} --title ${agent.id} wsl.exe bash "${shFile}"`;
+            } else {
+                const cmd = continueMode ? agent.command_continue : agent.command_fresh;
+                const escaped = cmd.replace(/'/g, "'\\''");
+                return `${prefix} --title ${agent.id} wsl.exe bash -lc '${escaped}'`;
+            }
         } else {
-            const cmd = continueMode ? agent.command_continue : agent.command_fresh;
-            const winCmd = cmd.replace(/'/g, '"');
-            return `${prefix} -d "${agent.cwd}" --title ${agent.id} cmd /k "${winCmd}"`;
+            // Native Windows: use .ps1 or .bat launchers
+            const defaultPs1 = path.join(launcherDir, `${agent.id}${suffix}.ps1`);
+            const defaultBat = path.join(launcherDir, `${agent.id}${suffix}.bat`);
+            const ps1Field = continueMode ? (agent.launcher_ps1_continue || agent.launcher_ps1) : agent.launcher_ps1;
+            const batField = continueMode ? (agent.launcher_win_continue || agent.launcher_win) : agent.launcher_win;
+            const ps1File = resolveManifestPath(pp, ps1Field, defaultPs1);
+            const batFile = resolveManifestPath(pp, batField, defaultBat);
+
+            if (fs.existsSync(ps1File)) {
+                return `${prefix} -d "${agent.cwd}" --title ${agent.id} powershell.exe -ExecutionPolicy Bypass -File "${ps1File}"`;
+            } else if (fs.existsSync(batFile)) {
+                return `${prefix} -d "${agent.cwd}" --title ${agent.id} cmd /k "${batFile}"`;
+            } else {
+                const cmd = continueMode ? agent.command_continue : agent.command_fresh;
+                const winCmd = cmd.replace(/'/g, '"');
+                return `${prefix} -d "${agent.cwd}" --title ${agent.id} cmd /k "${winCmd}"`;
+            }
         }
     }).join(' ');
 
     try {
-        exec(`wt ${tabArgs}`, { env: cleanEnv() });
+        exec(`${wtExe} ${tabArgs}`, { env: cleanEnv() });
         agents.forEach(a => {
             launchedProcesses.set(`${pp}:${a.id}`, {
                 agentId: a.id,
@@ -813,9 +882,9 @@ ipcMain.handle('launch-group-tabbed-wt', async (event, { group, projectPath: pp,
     }
 });
 
-// Windows: launch ALL agents (masters + workers) in a single window with tabs
+// Windows/WSL: launch ALL agents (masters + workers) in a single window with tabs
 ipcMain.handle('launch-all-tabbed-wt', async (event, { projectPath: pp, continueMode }) => {
-    if (process.platform !== 'win32') return { success: false, error: 'Windows only' };
+    if (process.platform !== 'win32' && !isWSL) return { success: false, error: 'Windows/WSL only' };
     pp = pp || projectPath;
 
     const manifestPath = path.join(pp, '.claude', 'launchers', 'manifest.json');
@@ -829,30 +898,46 @@ ipcMain.handle('launch-all-tabbed-wt', async (event, { projectPath: pp, continue
     const agents = manifest.agents;
     if (agents.length === 0) return { success: false, error: 'No agents in manifest' };
 
+    const wtExe = isWSL ? 'wt.exe' : 'wt';
     const tabArgs = agents.map((agent, i) => {
         const launcherDir = path.join(pp, '.claude', 'launchers');
         const suffix = continueMode ? '-continue' : '';
-        const defaultPs1 = path.join(launcherDir, `${agent.id}${suffix}.ps1`);
-        const defaultBat = path.join(launcherDir, `${agent.id}${suffix}.bat`);
-        const ps1Field = continueMode ? (agent.launcher_ps1_continue || agent.launcher_ps1) : agent.launcher_ps1;
-        const batField = continueMode ? (agent.launcher_win_continue || agent.launcher_win) : agent.launcher_win;
-        const ps1File = resolveManifestPath(pp, ps1Field, defaultPs1);
-        const batFile = resolveManifestPath(pp, batField, defaultBat);
         const prefix = i === 0 ? '' : '; new-tab';
 
-        if (fs.existsSync(ps1File)) {
-            return `${prefix} -d "${agent.cwd}" --title ${agent.id} powershell.exe -ExecutionPolicy Bypass -File "${ps1File}"`;
-        } else if (fs.existsSync(batFile)) {
-            return `${prefix} -d "${agent.cwd}" --title ${agent.id} cmd /k "${batFile}"`;
+        if (isWSL) {
+            const shField = continueMode ? (agent.launcher_sh_continue || agent.launcher_sh) : agent.launcher_sh;
+            const defaultSh = path.join(launcherDir, `${agent.id}${suffix}.sh`);
+            const shFile = resolveManifestPath(pp, shField, defaultSh);
+
+            if (fs.existsSync(shFile)) {
+                return `${prefix} --title ${agent.id} wsl.exe bash "${shFile}"`;
+            } else {
+                const cmd = continueMode ? agent.command_continue : agent.command_fresh;
+                const escaped = cmd.replace(/'/g, "'\\''");
+                return `${prefix} --title ${agent.id} wsl.exe bash -lc '${escaped}'`;
+            }
         } else {
-            const cmd = continueMode ? agent.command_continue : agent.command_fresh;
-            const winCmd = cmd.replace(/'/g, '"');
-            return `${prefix} -d "${agent.cwd}" --title ${agent.id} cmd /k "${winCmd}"`;
+            const defaultPs1 = path.join(launcherDir, `${agent.id}${suffix}.ps1`);
+            const defaultBat = path.join(launcherDir, `${agent.id}${suffix}.bat`);
+            const ps1Field = continueMode ? (agent.launcher_ps1_continue || agent.launcher_ps1) : agent.launcher_ps1;
+            const batField = continueMode ? (agent.launcher_win_continue || agent.launcher_win) : agent.launcher_win;
+            const ps1File = resolveManifestPath(pp, ps1Field, defaultPs1);
+            const batFile = resolveManifestPath(pp, batField, defaultBat);
+
+            if (fs.existsSync(ps1File)) {
+                return `${prefix} -d "${agent.cwd}" --title ${agent.id} powershell.exe -ExecutionPolicy Bypass -File "${ps1File}"`;
+            } else if (fs.existsSync(batFile)) {
+                return `${prefix} -d "${agent.cwd}" --title ${agent.id} cmd /k "${batFile}"`;
+            } else {
+                const cmd = continueMode ? agent.command_continue : agent.command_fresh;
+                const winCmd = cmd.replace(/'/g, '"');
+                return `${prefix} -d "${agent.cwd}" --title ${agent.id} cmd /k "${winCmd}"`;
+            }
         }
     }).join(' ');
 
     try {
-        exec(`wt ${tabArgs}`, { env: cleanEnv() });
+        exec(`${wtExe} ${tabArgs}`, { env: cleanEnv() });
         agents.forEach(a => {
             launchedProcesses.set(`${pp}:${a.id}`, {
                 agentId: a.id,
@@ -887,6 +972,10 @@ ipcMain.handle('launch-project-command', async (event, { command, cwd, name }) =
         } else if (process.platform === 'win32') {
             const winCmd = command.replace(/'/g, '"');
             terminalCmd = `where wt >nul 2>nul && wt new-tab -d "${pp}" --title "${name || 'Project'}" cmd /k "${winCmd}" || start cmd /k "cd /d ${pp} && ${winCmd}"`;
+
+        } else if (isWSL) {
+            const escaped = `cd '${pp}' && ${command}`.replace(/'/g, "'\\''");
+            terminalCmd = `wt.exe new-tab --title "${name || 'Project'}" wsl.exe bash -lc '${escaped}'`;
 
         } else {
             const linuxCmd = `cd '${pp}' && ${command}`;

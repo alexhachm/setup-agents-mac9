@@ -2,6 +2,7 @@
 # Usage: signal-wait.sh <signal-file> [timeout_seconds]
 # Waits for a signal file to be touched/created. Returns immediately when detected.
 # Falls back to polling if fswatch/inotifywait unavailable.
+# When timeout is 0, waits indefinitely (used for idle masters in the wake chain).
 set -e
 
 SIGNAL_FILE="$1"
@@ -11,27 +12,41 @@ TIMEOUT="${2:-30}"
 mkdir -p "$(dirname "$SIGNAL_FILE")"
 
 if command -v fswatch &>/dev/null; then
-    # macOS: use fswatch with timeout
+    # macOS: use fswatch
     fswatch -1 --event Created --event Updated --event Renamed "$SIGNAL_FILE" &
     WATCH_PID=$!
-    
-    # Timeout handler
-    (sleep "$TIMEOUT" && kill "$WATCH_PID" 2>/dev/null) &
-    TIMER_PID=$!
-    
-    wait "$WATCH_PID" 2>/dev/null
-    kill "$TIMER_PID" 2>/dev/null || true
-    
+
+    if [ "$TIMEOUT" -gt 0 ]; then
+        # Finite timeout
+        (sleep "$TIMEOUT" && kill "$WATCH_PID" 2>/dev/null) &
+        TIMER_PID=$!
+        wait "$WATCH_PID" 2>/dev/null
+        kill "$TIMER_PID" 2>/dev/null || true
+    else
+        # Infinite wait — no timeout handler
+        wait "$WATCH_PID" 2>/dev/null
+    fi
+
 elif command -v inotifywait &>/dev/null; then
     # Linux: use inotifywait
-    inotifywait -t "$TIMEOUT" -e modify,create "$SIGNAL_FILE" 2>/dev/null || true
+    if [ "$TIMEOUT" -gt 0 ]; then
+        inotifywait -t "$TIMEOUT" -e modify,create "$SIGNAL_FILE" 2>/dev/null || true
+    else
+        # Infinite wait — omit -t flag
+        inotifywait -e modify,create "$SIGNAL_FILE" 2>/dev/null || true
+    fi
 
 elif command -v powershell.exe &>/dev/null && ! grep -qi microsoft /proc/version 2>/dev/null; then
     # Native Windows (Git Bash/MSYS2): use .NET FileSystemWatcher via PowerShell
     # Skip this branch under WSL — Resolve-Path can't handle WSL paths
     SIGNAL_DIR=$(dirname "$SIGNAL_FILE")
     SIGNAL_NAME=$(basename "$SIGNAL_FILE")
-    TIMEOUT_MS=$((TIMEOUT * 1000))
+    if [ "$TIMEOUT" -gt 0 ]; then
+        TIMEOUT_MS=$((TIMEOUT * 1000))
+    else
+        # Infinite wait — use max int (~24 days, effectively forever)
+        TIMEOUT_MS=2147483647
+    fi
     powershell.exe -NoProfile -Command "
         \$w = New-Object System.IO.FileSystemWatcher
         \$w.Path = (Resolve-Path '$SIGNAL_DIR').Path
@@ -43,7 +58,6 @@ elif command -v powershell.exe &>/dev/null && ! grep -qi microsoft /proc/version
 
 else
     # Fallback: poll with short sleep
-    elapsed=0
     last_mod=""
     if [ -f "$SIGNAL_FILE" ]; then
         if [[ "$OSTYPE" == darwin* ]]; then
@@ -52,11 +66,12 @@ else
             last_mod=$(stat -c %Y "$SIGNAL_FILE" 2>/dev/null || echo "0")
         fi
     fi
-    
-    while [ "$elapsed" -lt "$TIMEOUT" ]; do
+
+    elapsed=0
+    while [ "$TIMEOUT" -eq 0 ] || [ "$elapsed" -lt "$TIMEOUT" ]; do
         sleep 2
         elapsed=$((elapsed + 2))
-        
+
         if [ -f "$SIGNAL_FILE" ]; then
             if [[ "$OSTYPE" == darwin* ]]; then
                 current_mod=$(stat -f %m "$SIGNAL_FILE" 2>/dev/null || echo "0")

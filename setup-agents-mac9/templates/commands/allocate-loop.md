@@ -34,7 +34,6 @@ You run the fast operational loop. You read Tier 3 decomposed tasks from Master-
 ## Internal Counters
 ```
 context_budget = 0         # Reset trigger at 5000
-started_at = now()         # Reset trigger at 20 min
 polling_cycle = 0          # For periodic health checks
 last_activity = now()      # For adaptive signal timeout
 ```
@@ -226,7 +225,7 @@ Cross-reference with the task-queue.json to see how many tasks were in the reque
    - Tasks tagged `VALIDATION: tier3` → spawn build-validator + verify-app
 5. If issues, create fix tasks
 6. If clean, push to main
-7. Update handoff.json status to `"integrated"`
+7. Update the request's status in handoff.json queue: find the matching `request_id` entry in `.requests[]` and set its `status` to `"integrated"`. Do NOT overwrite the whole file.
 8. Touch `.claude/signals/.handoff-signal` (so Master-2 can track)
 9. `context_budget += 100`
 10. `last_activity = now()`
@@ -234,22 +233,18 @@ Cross-reference with the task-queue.json to see how many tasks were in the reque
 ### Step 6: Heartbeat check (every 3rd cycle)
 If `polling_cycle % 3 == 0`:
 - **Skip workers with status "idle"** — they are NOT running (no terminal open), so no heartbeat expected
-- Only check "running"/"busy" workers for stale heartbeats (>90s → set status to "idle")
+- **Skip workers with `launched_at` less than 60 seconds ago** — Master-2 just launched them for a Tier 2 task; give them time to start up and send their first heartbeat. Re-launching during this window causes a double-launch race where the second instance finds no task file and exits.
+- Only check "running"/"busy" workers for stale heartbeats (>90s AND `launched_at` > 60s ago → set status to "idle")
 - Update agent-health.json with current context_budget
 
-### Step 7: Reset check
+**IMPORTANT: Do NOT re-launch workers for Tier 2 tasks.** If a worker's status is "assigned" and it has a `launched_at` timestamp, Master-2 already launched it. Trust the launch. Only intervene if the heartbeat is stale AND `launched_at` is more than 120 seconds ago.
 
-Check if reset needed:
-```bash
-# Time-based check
-started_at_ts=$(jq -r '.["master-3"].started_at // empty' .claude/state/agent-health.json 2>/dev/null)
-# If more than 20 minutes since start, consider reset
-```
+### Step 7: Reset check
 
 **Qualitative self-check (every 20 cycles):**
 List all active workers and their domains from memory. If you can't do it accurately, reset immediately.
 
-If `context_budget >= 5000` OR 20 minutes elapsed OR self-detected degradation:
+If `context_budget >= 5000` OR self-detected degradation:
 1. Go to Step 8 (distill and reset)
 
 Otherwise, go back to Step 1.

@@ -61,23 +61,31 @@ User describes work: "Fix the popout bugs" / "Add authentication" / etc.
 **Action:**
 1. Ask 1-2 clarifying questions if truly unclear (usually skip this)
 2. Structure into optimal prompt (under 60 seconds)
-3. Write to handoff.json AND touch signal
-4. Confirm to user
+3. **APPEND** to the requests queue in handoff.json (DO NOT overwrite — multiple requests may be pending)
+4. Touch signal
+5. Confirm to user
 
+**CRITICAL: handoff.json is a QUEUE, not a single slot.** You must READ the existing file, APPEND your new request to the `.requests` array, then WRITE it back. Never overwrite — that drops pending requests.
+
+**If Bash is healthy:**
 ```bash
-bash .claude/scripts/state-lock.sh .claude/state/handoff.json 'cat > .claude/state/handoff.json << HANDOFF
-{
-  "request_id": "[short-name]",
-  "timestamp": "[ISO timestamp]",
-  "type": "[bug-fix|feature|refactor]",
-  "description": "[clear description]",
-  "tasks": ["[task1]", "[task2]"],
-  "success_criteria": ["[criterion1]"],
-  "complexity_hint": "[trivial|simple|moderate|complex]",
-  "status": "pending_decomposition"
-}
-HANDOFF'
+bash .claude/scripts/state-lock.sh .claude/state/handoff.json 'jq ".requests += [{
+  \"request_id\": \"[short-name]\",
+  \"timestamp\": \"[ISO timestamp]\",
+  \"type\": \"[bug-fix|feature|refactor]\",
+  \"description\": \"[clear description]\",
+  \"tasks\": [\"[task1]\", \"[task2]\"],
+  \"success_criteria\": [\"[criterion1]\"],
+  \"complexity_hint\": \"[trivial|simple|moderate|complex]\",
+  \"status\": \"pending_decomposition\"
+}]" .claude/state/handoff.json > /tmp/handoff-new.json && mv /tmp/handoff-new.json .claude/state/handoff.json'
 ```
+
+**If in native-only mode (Bash health check failed):**
+1. Use Read tool to read `.claude/state/handoff.json`
+2. Parse the JSON, append your new request object to the `.requests` array
+3. Use Write tool to write the updated JSON back
+4. Use Bash to touch the signal: `touch .claude/signals/.handoff-signal`
 
 **Signal Master-2 immediately:**
 ```bash
@@ -89,7 +97,7 @@ touch .claude/signals/.handoff-signal
 echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [master-1] [REQUEST] id=[request_id] hint=[complexity_hint] \"[description]\"" >> .claude/logs/activity.log
 ```
 
-Say: "Request '[request_id]' sent to Master-2. Complexity hint: [trivial/simple/moderate/complex]. Master-2 will triage and act."
+Say: "Request '[request_id]' queued for Master-2. Complexity hint: [trivial/simple/moderate/complex]. Master-2 will triage and act."
 
 **Complexity hints** (help Master-2 triage faster, but Master-2 makes the final call):
 - trivial: "change button color", "fix typo" → likely Tier 1
@@ -165,13 +173,13 @@ User says: "status" / "what's happening" / "show workers"
 
 **Action:** Read and display:
 1. `.claude/state/worker-status.json` - worker states
-2. `.claude/state/handoff.json` - pending requests
+2. `.claude/state/handoff.json` - pending request queue (show count of pending + in-progress requests)
 3. `.claude/state/task-queue.json` - decomposed tasks
 4. `.claude/state/agent-health.json` - agent health
 5. `TaskList()` - all tasks
 6. `.claude/logs/activity.log` - recent activity (last 15 lines)
 
-Format output clearly with agent health and tier information.
+Format output clearly with agent health and tier information. Show how many requests are queued vs being processed.
 
 ### Type 4: Clarification from Master-2
 **Poll this EVERY cycle** (before waiting for user input):

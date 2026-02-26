@@ -32,7 +32,6 @@ context_budget += (files_read × avg_lines / 10) + (tool_calls × 5) + (allocati
 Update your entry in `agent-health.json` every 5 polling cycles.
 
 ## Reset Triggers
-- 20 minutes continuous operation
 - Context budget exceeds 5000
 - Self-detected degradation (can't recall worker assignments accurately)
 

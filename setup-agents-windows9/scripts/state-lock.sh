@@ -1,10 +1,18 @@
 #!/usr/bin/env bash
 # Usage: state-lock.sh <state-file> <command>
+#        state-lock.sh <state-file> --stdin   (reads content from stdin)
 # Acquires an exclusive lock before running <command>, releases after.
-# Writes go to a temp file first, then atomically move into place.
+# Use --stdin to safely write JSON without shell quoting issues.
 set -e
+# Ensure common tool paths are available (jq may live in ~/.local/bin)
+export PATH="$HOME/.local/bin:$PATH"
 STATE_FILE="$1"
 shift
+STDIN_MODE=false
+if [ "$1" = "--stdin" ]; then
+    STDIN_MODE=true
+    shift
+fi
 LOCK_DIR="${STATE_FILE}.lockdir"
 TMP_FILE="${STATE_FILE}.tmp.$$"
 
@@ -33,7 +41,11 @@ if command -v flock &>/dev/null; then
     LOCK_FILE="${STATE_FILE}.lock"
     exec 200>"$LOCK_FILE"
     flock -w 10 200 || { echo "ERROR: Could not acquire lock on $STATE_FILE" >&2; exit 1; }
-    eval "$@"
+    if $STDIN_MODE; then
+        cat > "$STATE_FILE"
+    else
+        eval "$@"
+    fi
     # Validate JSON if jq is available and file looks like JSON
     if command -v jq &>/dev/null && [ -f "$STATE_FILE" ]; then
         if ! jq . "$STATE_FILE" > /dev/null 2>&1; then
@@ -53,7 +65,11 @@ else
         sleep 0.1
     done
     trap cleanup EXIT INT TERM
-    eval "$@"
+    if $STDIN_MODE; then
+        cat > "$STATE_FILE"
+    else
+        eval "$@"
+    fi
     # Validate JSON if jq is available and file looks like JSON
     if command -v jq &>/dev/null && [ -f "$STATE_FILE" ]; then
         if ! jq . "$STATE_FILE" > /dev/null 2>&1; then

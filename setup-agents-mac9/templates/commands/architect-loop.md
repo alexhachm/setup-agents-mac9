@@ -68,12 +68,17 @@ Then begin the loop.
 ```bash
 bash .claude/scripts/signal-wait.sh .claude/signals/.handoff-signal 15
 ```
-Then read handoff.json:
+Then read the request queue:
 ```bash
 cat .claude/state/handoff.json
 ```
 
-If `status` is NOT `"pending_decomposition"`, go to Step 6.
+**handoff.json is a QUEUE** with format `{"requests":[...]}`. Find the FIRST request where `status` is `"pending_decomposition"`. If no such request exists, go to Step 6.
+
+When you find one, mark it as `"processing"` before you start work (prevents re-processing on signal re-fire):
+```bash
+bash .claude/scripts/state-lock.sh .claude/state/handoff.json 'jq "(.requests[] | select(.request_id == \"[THE_ID]\")).status = \"processing\"" .claude/state/handoff.json > /tmp/handoff-upd.json && mv /tmp/handoff-upd.json .claude/state/handoff.json'
+```
 
 ### Step 2: TRIAGE — Classify the request (ALWAYS DO THIS FIRST)
 
@@ -125,17 +130,9 @@ echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [master-2] [TIER_CLASSIFY] id=[request_id
    git push origin HEAD || git push --force-with-lease origin HEAD
    gh pr create --base $(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@' || echo main) --fill 2>&1
    ```
-6. Update handoff.json:
+6. Update the request's status in the queue (do NOT overwrite the whole file):
    ```bash
-   bash .claude/scripts/state-lock.sh .claude/state/handoff.json 'cat > .claude/state/handoff.json << DONE
-   {
-     "request_id": "[id]",
-     "status": "completed_tier1",
-     "completed_at": "[ISO timestamp]",
-     "pr_url": "[PR URL]",
-     "tier": 1
-   }
-   DONE'
+   bash .claude/scripts/state-lock.sh .claude/state/handoff.json 'jq "(.requests[] | select(.request_id == \"[id]\")).status = \"completed_tier1\" | (.requests[] | select(.request_id == \"[id]\")).completed_at = \"[ISO timestamp]\" | (.requests[] | select(.request_id == \"[id]\")).pr_url = \"[PR URL]\" | (.requests[] | select(.request_id == \"[id]\")).tier = 1" .claude/state/handoff.json > /tmp/handoff-upd.json && mv /tmp/handoff-upd.json .claude/state/handoff.json'
    ```
 7. Log and increment counter:
    ```bash
@@ -167,13 +164,13 @@ Go to Step 6.
      activeForm: "Working on [task]..."
    })
    ```
-4. Release claim and update worker status:
+4. Release claim, update worker status, and set `launched_at` timestamp (prevents Master-3 double-launch):
    ```bash
-   bash .claude/scripts/state-lock.sh .claude/state/worker-status.json 'jq ".\"worker-N\".claimed_by = null | .\"worker-N\".status = \"assigned\" | .\"worker-N\".current_task = \"[subject]\"" .claude/state/worker-status.json > /tmp/ws.json && mv /tmp/ws.json .claude/state/worker-status.json'
+   bash .claude/scripts/state-lock.sh .claude/state/worker-status.json 'jq ".\"worker-N\".claimed_by = null | .\"worker-N\".status = \"assigned\" | .\"worker-N\".current_task = \"[subject]\" | .\"worker-N\".launched_at = \"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'\"" .claude/state/worker-status.json > /tmp/ws.json && mv /tmp/ws.json .claude/state/worker-status.json'
    ```
-5. Update handoff.json:
+5. Update the request's status in the queue:
    ```bash
-   bash .claude/scripts/state-lock.sh .claude/state/handoff.json "jq '.status = \"assigned_tier2\" | .tier = 2' .claude/state/handoff.json > /tmp/ho.json && mv /tmp/ho.json .claude/state/handoff.json"
+   bash .claude/scripts/state-lock.sh .claude/state/handoff.json 'jq "(.requests[] | select(.request_id == \"[id]\")).status = \"assigned_tier2\" | (.requests[] | select(.request_id == \"[id]\")).tier = 2" .claude/state/handoff.json > /tmp/ho.json && mv /tmp/ho.json .claude/state/handoff.json'
    ```
 6. **Write task file for the worker** (cross-session handoff — the worker reads this on startup):
    ```bash
@@ -237,9 +234,9 @@ Go to Step 6.
    }
    TASKS'
    ```
-5. Update handoff.json:
+5. Update the request's status in the queue:
    ```bash
-   bash .claude/scripts/state-lock.sh .claude/state/handoff.json "jq '.status = \"decomposed\" | .tier = 3' .claude/state/handoff.json > /tmp/ho.json && mv /tmp/ho.json .claude/state/handoff.json"
+   bash .claude/scripts/state-lock.sh .claude/state/handoff.json 'jq "(.requests[] | select(.request_id == \"[request_id]\")).status = \"decomposed\" | (.requests[] | select(.request_id == \"[request_id]\")).tier = 3" .claude/state/handoff.json > /tmp/ho.json && mv /tmp/ho.json .claude/state/handoff.json'
    ```
 6. Signal Master-3:
    ```bash
@@ -278,7 +275,15 @@ commits_since=$(git log --since="$last_scan" --oneline 2>/dev/null | wc -l | tr 
 If `commits_since >= 5`: do incremental rescan (read changed files, update map).
 If `commits_since >= 20` or changes span >50% of domains: full reset (Step 7).
 
-### Step 6: Wait and repeat
+### Step 6: Check for more pending requests, then wait
+
+**Before sleeping, check if there are more pending requests in the queue:**
+```bash
+cat .claude/state/handoff.json
+```
+If any request has `status: "pending_decomposition"`, go back to **Step 1** immediately (skip the signal wait). This drains the queue before idling.
+
+**Only if the queue is empty (no pending requests):**
 
 Adaptive signal timeout based on activity:
 ```bash

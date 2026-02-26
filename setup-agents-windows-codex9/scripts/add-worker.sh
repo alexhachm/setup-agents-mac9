@@ -249,29 +249,43 @@ worktree_path=".worktrees/wt-$next_num"
 git branch -D "$branch_name" 2>/dev/null || true
 git worktree add "$worktree_path" -b "$branch_name"
 
-# Link shared state into the new worktree (junction on Windows, symlink elsewhere)
+# Cross-platform directory link helper (NTFS junction on Windows/WSL, symlink elsewhere)
+_link_dir() {
+    local link_path="$1" target_path="$2"
+    rm -rf "$link_path"
+    local use_junction=false
+    if [[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin* ]]; then
+        use_junction=true
+    elif grep -qi microsoft /proc/version 2>/dev/null && [[ "$link_path" == /mnt/* ]]; then
+        use_junction=true
+    fi
+    if $use_junction && command -v powershell.exe &>/dev/null; then
+        local win_link win_target
+        if command -v cygpath &>/dev/null; then
+            win_link=$(cygpath -w "$link_path" 2>/dev/null)
+            win_target=$(cd "$target_path" 2>/dev/null && cygpath -w "$(pwd)" 2>/dev/null || cygpath -w "$target_path" 2>/dev/null)
+        elif command -v wslpath &>/dev/null; then
+            win_link=$(wslpath -w "$link_path" 2>/dev/null)
+            win_target=$(cd "$target_path" 2>/dev/null && wslpath -w "$(pwd)" 2>/dev/null || wslpath -w "$target_path" 2>/dev/null)
+        else
+            win_link=$(echo "$link_path" | sed 's|^/mnt/\([a-z]\)/|\U\1:\\|; s|/|\\|g')
+            win_target=$(cd "$target_path" 2>/dev/null && pwd | sed 's|^/mnt/\([a-z]\)/|\U\1:\\|; s|/|\\|g' || echo "$target_path" | sed 's|^/mnt/\([a-z]\)/|\U\1:\\|; s|/|\\|g')
+        fi
+        powershell.exe -Command "New-Item -ItemType Junction -Path '$win_link' -Target '$win_target'" > /dev/null 2>&1
+    else
+        ln -sf "$target_path" "$link_path"
+    fi
+}
+
+# Link shared state into the new worktree (junction on Windows/WSL, symlink elsewhere)
 shared_state_dir="$PROJECT_DIR/.codex-shared-state"
 if [ -d "$shared_state_dir" ]; then
-    rm -rf "$worktree_path/.codex/state"
-    if [[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin* ]]; then
-        win_link=$(cygpath -w "$worktree_path/.codex/state")
-        win_target=$(cygpath -w "$shared_state_dir")
-        cmd //c "mklink /J \"$win_link\" \"$win_target\"" > /dev/null 2>&1
-    else
-        ln -sf "../../../.codex-shared-state" "$worktree_path/.codex/state"
-    fi
+    _link_dir "$worktree_path/.codex/state" "$shared_state_dir"
 fi
 
 # Link logs directory so new worker can write to shared log
-mkdir -p "$worktree_path/.codex/logs"
-rm -rf "$worktree_path/.codex/logs"
-if [[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin* ]]; then
-    win_link=$(cygpath -w "$worktree_path/.codex/logs")
-    win_target=$(cygpath -w "$PROJECT_DIR/.codex/logs")
-    cmd //c "mklink /J \"$win_link\" \"$win_target\"" > /dev/null 2>&1
-else
-    ln -sf "../../../.codex/logs" "$worktree_path/.codex/logs"
-fi
+mkdir -p "$PROJECT_DIR/.codex/logs"
+_link_dir "$worktree_path/.codex/logs" "$PROJECT_DIR/.codex/logs"
 
 # Copy worker AGENTS.md
 if [ -f "$PROJECT_DIR/.worktrees/wt-1/AGENTS.md" ]; then

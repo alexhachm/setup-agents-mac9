@@ -27,13 +27,19 @@ elif command -v inotifywait &>/dev/null; then
     inotifywait -t "$TIMEOUT" -e modify,create "$SIGNAL_FILE" 2>/dev/null || true
 
 elif command -v powershell.exe &>/dev/null; then
-    # Windows: use .NET FileSystemWatcher via PowerShell for instant notification
+    # Windows/WSL: use .NET FileSystemWatcher via PowerShell for instant notification
     SIGNAL_DIR=$(dirname "$SIGNAL_FILE")
     SIGNAL_NAME=$(basename "$SIGNAL_FILE")
     TIMEOUT_MS=$((TIMEOUT * 1000))
+    # Convert WSL paths (/mnt/c/...) to Windows paths (C:\...) for PowerShell
+    if command -v wslpath &>/dev/null; then
+        WIN_SIGNAL_DIR=$(wslpath -w "$SIGNAL_DIR" 2>/dev/null || echo "$SIGNAL_DIR")
+    else
+        WIN_SIGNAL_DIR="$SIGNAL_DIR"
+    fi
     powershell.exe -NoProfile -Command "
         \$w = New-Object System.IO.FileSystemWatcher
-        \$w.Path = (Resolve-Path '$SIGNAL_DIR').Path
+        \$w.Path = '$WIN_SIGNAL_DIR'
         \$w.Filter = '$SIGNAL_NAME'
         \$w.NotifyFilter = [System.IO.NotifyFilters]::LastWrite -bor [System.IO.NotifyFilters]::CreationTime -bor [System.IO.NotifyFilters]::FileName
         \$r = \$w.WaitForChanged([System.IO.WatcherChangeTypes]::All, $TIMEOUT_MS)

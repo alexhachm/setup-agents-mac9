@@ -63,16 +63,33 @@ ok()    { echo -e "   ${GREEN}OK:${NC} $1"; }
 skip()  { echo -e "   ${YELLOW}SKIP:${NC} $1"; }
 fail()  { echo -e "   ${RED}FAIL:${NC} $1"; }
 
-# Cross-platform directory link: uses NTFS junctions on Windows, symlinks elsewhere
+# Cross-platform directory link: uses NTFS junctions on Windows/WSL, symlinks elsewhere
 # Usage: link_dir <link-path> <target-path>
 link_dir() {
     local link_path="$1" target_path="$2"
     rm -rf "$link_path"
+    # Detect if we're on NTFS (Git Bash, MSYS2, Cygwin, or WSL with /mnt/c paths)
+    local use_junction=false
     if [[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin* ]]; then
-        # Windows: create NTFS junction via PowerShell (cmd mklink /J is unreliable from Git Bash)
+        use_junction=true
+    elif grep -qi microsoft /proc/version 2>/dev/null && [[ "$link_path" == /mnt/* ]]; then
+        # WSL on an NTFS mount — symlinks don't work, use PowerShell junction
+        use_junction=true
+    fi
+
+    if $use_junction && command -v powershell.exe &>/dev/null; then
         local win_link win_target
-        win_link=$(cygpath -w "$link_path" 2>/dev/null || echo "$link_path" | sed 's|/|\\|g')
-        win_target=$(cd "$target_path" 2>/dev/null && cygpath -w "$(pwd)" 2>/dev/null || cygpath -w "$target_path" 2>/dev/null || echo "$target_path" | sed 's|/|\\|g')
+        if command -v cygpath &>/dev/null; then
+            win_link=$(cygpath -w "$link_path" 2>/dev/null)
+            win_target=$(cd "$target_path" 2>/dev/null && cygpath -w "$(pwd)" 2>/dev/null || cygpath -w "$target_path" 2>/dev/null)
+        elif command -v wslpath &>/dev/null; then
+            win_link=$(wslpath -w "$link_path" 2>/dev/null)
+            win_target=$(cd "$target_path" 2>/dev/null && wslpath -w "$(pwd)" 2>/dev/null || wslpath -w "$target_path" 2>/dev/null)
+        else
+            # Fallback: convert /mnt/c/... to C:\...
+            win_link=$(echo "$link_path" | sed 's|^/mnt/\([a-z]\)/|\U\1:\\|; s|/|\\|g')
+            win_target=$(cd "$target_path" 2>/dev/null && pwd | sed 's|^/mnt/\([a-z]\)/|\U\1:\\|; s|/|\\|g' || echo "$target_path" | sed 's|^/mnt/\([a-z]\)/|\U\1:\\|; s|/|\\|g')
+        fi
         powershell.exe -Command "New-Item -ItemType Junction -Path '$win_link' -Target '$win_target'" > /dev/null 2>&1
     else
         ln -sf "$target_path" "$link_path"
@@ -316,7 +333,7 @@ ok "Activity log initialized"
 # ============================================================================
 step "Initializing state files..."
 
-echo '{}' > .claude/state/handoff.json
+echo '{"requests":[]}' > .claude/state/handoff.json
 echo '{}' > .claude/state/codebase-map.json
 # Build initial worker-status with all workers idle (launched on demand)
 echo "{}" | jq --argjson n "$worker_count" '

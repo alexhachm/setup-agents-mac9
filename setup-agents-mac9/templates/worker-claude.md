@@ -56,7 +56,7 @@ Before ANY reset (whether triggered by budget, task count, or RESET task):
 This is the most valuable thing you do besides coding. Your context is about to be erased — write down what you learned.
 
 ## Signal Files
-Wait for work: `bash .claude/scripts/signal-wait.sh .claude/signals/.worker-signal 10`
+Wait for work: `bash .claude/scripts/signal-wait.sh .claude/signals/.worker-N-wake 10` (replace N with your worker number)
 Signal completion: `touch .claude/signals/.completion-signal`
 
 ## Domain Rules

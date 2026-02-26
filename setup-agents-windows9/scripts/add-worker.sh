@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# Ensure common tool paths are available (jq may live in ~/.local/bin)
+export PATH="$HOME/.local/bin:$PATH"
 
 PROJECT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$PROJECT_DIR"
@@ -55,16 +57,25 @@ write_worker_launchers() {
     local escaped_fresh
     local escaped_continue
 
-    fresh_command="cd '$worker_wsl_path' && exec claude --model opus --dangerously-skip-permissions '/worker-loop'"
-    continue_command="cd '$worker_wsl_path' && exec claude --continue --model opus --dangerously-skip-permissions"
+    fresh_command="cd '$worker_wsl_path' && export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 && exec claude --model opus --dangerously-skip-permissions '/worker-loop'"
+    continue_command="cd '$worker_wsl_path' && export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 && exec claude --continue --model opus --dangerously-skip-permissions"
     escaped_fresh="${fresh_command//\"/\\\"}"
     escaped_continue="${continue_command//\"/\\\"}"
 
+    # .sh launchers (preferred in WSL — direct bash, no PowerShell middleman)
+    printf '#!/usr/bin/env bash\nprintf "\\n  ████  I AM WORKER-%s (Opus)  ████\\n\\n"\n%s\n' \
+        "$worker_num" "$fresh_command" > "$launcher_dir/worker-${worker_num}.sh"
+    printf '#!/usr/bin/env bash\nprintf "\\n  ████  I AM WORKER-%s (Opus) [CONTINUE]  ████\\n\\n"\n%s\n' \
+        "$worker_num" "$continue_command" > "$launcher_dir/worker-${worker_num}-continue.sh"
+    chmod +x "$launcher_dir/worker-${worker_num}.sh" "$launcher_dir/worker-${worker_num}-continue.sh"
+
+    # .ps1 launchers
     printf 'Clear-Host\nWrite-Host "`n  ████  I AM WORKER-%s (Opus)  ████`n" -ForegroundColor Cyan\n& wsl.exe -e bash -lc "%s"\n' \
         "$worker_num" "$escaped_fresh" > "$launcher_dir/worker-${worker_num}.ps1"
     printf 'Clear-Host\nWrite-Host "`n  ████  I AM WORKER-%s (Opus) [CONTINUE]  ████`n" -ForegroundColor Cyan\n& wsl.exe -e bash -lc "%s"\n' \
         "$worker_num" "$escaped_continue" > "$launcher_dir/worker-${worker_num}-continue.ps1"
 
+    # .bat launchers
     printf '@echo off\ncls\necho.\necho   ████  I AM WORKER-%s (Opus)  ████\necho.\nwsl.exe -e bash -lc "%s"\n' \
         "$worker_num" "$escaped_fresh" > "$launcher_dir/worker-${worker_num}.bat"
     printf '@echo off\ncls\necho.\necho   ████  I AM WORKER-%s (Opus) [CONTINUE]  ████\necho.\nwsl.exe -e bash -lc "%s"\n' \
@@ -84,8 +95,10 @@ add_manifest_agent() {
     local command_continue
     local tmp_file
 
-    command_fresh="cd '$cwd_wsl' && exec claude --model $model --dangerously-skip-permissions '$fresh_slash'"
-    command_continue="cd '$cwd_wsl' && exec claude --continue --model $model --dangerously-skip-permissions"
+    local teamExport=""
+    [[ "$id" != "master-1" ]] && teamExport="export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 && "
+    command_fresh="cd '$cwd_wsl' && ${teamExport}exec claude --model $model --dangerously-skip-permissions '$fresh_slash'"
+    command_continue="cd '$cwd_wsl' && ${teamExport}exec claude --continue --model $model --dangerously-skip-permissions"
 
     tmp_file="$(mktemp)"
     jq \
@@ -94,6 +107,8 @@ add_manifest_agent() {
         --arg role "$role" \
         --arg model "$model" \
         --arg cwd "$cwd_win" \
+        --arg launcher_sh ".claude/launchers/$id.sh" \
+        --arg launcher_sh_continue ".claude/launchers/$id-continue.sh" \
         --arg launcher_win ".claude/launchers/$id.bat" \
         --arg launcher_win_continue ".claude/launchers/$id-continue.bat" \
         --arg launcher_ps1 ".claude/launchers/$id.ps1" \
@@ -106,6 +121,8 @@ add_manifest_agent() {
             role: $role,
             model: $model,
             cwd: $cwd,
+            launcher_sh: $launcher_sh,
+            launcher_sh_continue: $launcher_sh_continue,
             launcher_win: $launcher_win,
             launcher_win_continue: $launcher_win_continue,
             launcher_ps1: $launcher_ps1,
@@ -186,29 +203,43 @@ worktree_path=".worktrees/wt-$next_num"
 git branch -D "$branch_name" 2>/dev/null || true
 git worktree add "$worktree_path" -b "$branch_name"
 
-# Link shared state into the new worktree (junction on Windows, symlink elsewhere)
+# Cross-platform directory link helper (NTFS junction on Windows/WSL, symlink elsewhere)
+_link_dir() {
+    local link_path="$1" target_path="$2"
+    rm -rf "$link_path"
+    local use_junction=false
+    if [[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin* ]]; then
+        use_junction=true
+    elif grep -qi microsoft /proc/version 2>/dev/null && [[ "$link_path" == /mnt/* ]]; then
+        use_junction=true
+    fi
+    if $use_junction && command -v powershell.exe &>/dev/null; then
+        local win_link win_target
+        if command -v cygpath &>/dev/null; then
+            win_link=$(cygpath -w "$link_path" 2>/dev/null)
+            win_target=$(cd "$target_path" 2>/dev/null && cygpath -w "$(pwd)" 2>/dev/null || cygpath -w "$target_path" 2>/dev/null)
+        elif command -v wslpath &>/dev/null; then
+            win_link=$(wslpath -w "$link_path" 2>/dev/null)
+            win_target=$(cd "$target_path" 2>/dev/null && wslpath -w "$(pwd)" 2>/dev/null || wslpath -w "$target_path" 2>/dev/null)
+        else
+            win_link=$(echo "$link_path" | sed 's|^/mnt/\([a-z]\)/|\U\1:\\|; s|/|\\|g')
+            win_target=$(cd "$target_path" 2>/dev/null && pwd | sed 's|^/mnt/\([a-z]\)/|\U\1:\\|; s|/|\\|g' || echo "$target_path" | sed 's|^/mnt/\([a-z]\)/|\U\1:\\|; s|/|\\|g')
+        fi
+        powershell.exe -Command "New-Item -ItemType Junction -Path '$win_link' -Target '$win_target'" > /dev/null 2>&1
+    else
+        ln -sf "$target_path" "$link_path"
+    fi
+}
+
+# Link shared state into the new worktree (junction on Windows/WSL, symlink elsewhere)
 shared_state_dir="$PROJECT_DIR/.claude-shared-state"
 if [ -d "$shared_state_dir" ]; then
-    rm -rf "$worktree_path/.claude/state"
-    if [[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin* ]]; then
-        win_link=$(cygpath -w "$worktree_path/.claude/state")
-        win_target=$(cygpath -w "$shared_state_dir")
-        cmd //c "mklink /J \"$win_link\" \"$win_target\"" > /dev/null 2>&1
-    else
-        ln -sf "../../../.claude-shared-state" "$worktree_path/.claude/state"
-    fi
+    _link_dir "$worktree_path/.claude/state" "$shared_state_dir"
 fi
 
 # Link logs directory so new worker can write to shared log
-mkdir -p "$worktree_path/.claude/logs"
-rm -rf "$worktree_path/.claude/logs"
-if [[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin* ]]; then
-    win_link=$(cygpath -w "$worktree_path/.claude/logs")
-    win_target=$(cygpath -w "$PROJECT_DIR/.claude/logs")
-    cmd //c "mklink /J \"$win_link\" \"$win_target\"" > /dev/null 2>&1
-else
-    ln -sf "../../../.claude/logs" "$worktree_path/.claude/logs"
-fi
+mkdir -p "$PROJECT_DIR/.claude/logs"
+_link_dir "$worktree_path/.claude/logs" "$PROJECT_DIR/.claude/logs"
 
 # Copy worker CLAUDE.md
 if [ -f "$PROJECT_DIR/.worktrees/wt-1/CLAUDE.md" ]; then

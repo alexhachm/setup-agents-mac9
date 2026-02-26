@@ -162,7 +162,7 @@ echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [AGENT_ID] [ACTION] details" >> .claude/l
 |-------|----------------|-------------------|------------|------|
 | Master-1 | ~40 conversation turns | — | — | ~5s |
 | Master-2 | 4 Tier 1 executions OR 6 decompositions | Staleness (5+ merged commits) | — | ~10 min (full) / ~1 min (incremental) |
-| Master-3 | 20 min continuous operation | Budget threshold | — | ~30s |
+| Master-3 | Context budget threshold (5000) | Self-detected degradation | — | ~30s |
 | Workers | Context budget threshold | Self-detected degradation | 6 tasks | ~15s |
 
 **Staggering:** Before resetting, Master-2 and Master-3 check `agent-health.json` to ensure the other is not currently resetting. First-come-first-served.

@@ -13,6 +13,7 @@ fi
 # Resolve project directory (script lives at .claude/scripts/)
 PROJECT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 WORKTREE="$PROJECT_DIR/.worktrees/wt-$WORKER_NUM"
+LAUNCHER_SH="$PROJECT_DIR/.claude/launchers/worker-${WORKER_NUM}.sh"
 LAUNCHER_PS1="$PROJECT_DIR/.claude/launchers/worker-${WORKER_NUM}.ps1"
 LAUNCHER_BAT="$PROJECT_DIR/.claude/launchers/worker-${WORKER_NUM}.bat"
 
@@ -22,39 +23,33 @@ if [ ! -d "$WORKTREE" ]; then
     exit 1
 fi
 
-if [ ! -f "$LAUNCHER_PS1" ] && [ ! -f "$LAUNCHER_BAT" ]; then
-    echo "ERROR: Worker launcher not found (.ps1/.bat) for worker-$WORKER_NUM" >&2
+if [ ! -f "$LAUNCHER_SH" ] && [ ! -f "$LAUNCHER_PS1" ] && [ ! -f "$LAUNCHER_BAT" ]; then
+    echo "ERROR: Worker launcher not found (.sh/.ps1/.bat) for worker-$WORKER_NUM" >&2
     exit 1
 fi
 
 # WSL runtime (primary path for windows9 package)
 if grep -qi microsoft /proc/version 2>/dev/null || [ -n "${WSL_DISTRO_NAME:-}" ]; then
-    if ! command -v wslpath >/dev/null 2>&1; then
-        echo "ERROR: wslpath not found; cannot convert launcher paths" >&2
-        exit 1
-    fi
-
-    WIN_WORKTREE="$(wslpath -w "$WORKTREE")"
-    WIN_LAUNCHER_PS1=""
-    WIN_LAUNCHER_BAT=""
-
-    if [ -f "$LAUNCHER_PS1" ]; then
-        WIN_LAUNCHER_PS1="$(wslpath -w "$LAUNCHER_PS1")"
-    fi
-    if [ -f "$LAUNCHER_BAT" ]; then
-        WIN_LAUNCHER_BAT="$(wslpath -w "$LAUNCHER_BAT")"
-    fi
-
     if command -v wt.exe >/dev/null 2>&1; then
-        if [ -n "$WIN_LAUNCHER_PS1" ]; then
+        # Prefer .sh launcher (direct bash, no PowerShell middleman)
+        if [ -f "$LAUNCHER_SH" ]; then
+            wt.exe -w workers new-tab --title "Worker-$WORKER_NUM" wsl.exe bash "$LAUNCHER_SH" >/dev/null 2>&1 &
+        elif [ -f "$LAUNCHER_PS1" ]; then
+            WIN_LAUNCHER_PS1="$(wslpath -w "$LAUNCHER_PS1")"
+            WIN_WORKTREE="$(wslpath -w "$WORKTREE")"
             wt.exe -w workers new-tab -d "$WIN_WORKTREE" --title "Worker-$WORKER_NUM" powershell.exe -ExecutionPolicy Bypass -File "$WIN_LAUNCHER_PS1" >/dev/null 2>&1 &
         else
+            WIN_LAUNCHER_BAT="$(wslpath -w "$LAUNCHER_BAT")"
+            WIN_WORKTREE="$(wslpath -w "$WORKTREE")"
             wt.exe -w workers new-tab -d "$WIN_WORKTREE" --title "Worker-$WORKER_NUM" cmd.exe /c "$WIN_LAUNCHER_BAT" >/dev/null 2>&1 &
         fi
     else
-        if [ -n "$WIN_LAUNCHER_PS1" ]; then
+        # Fallback: no Windows Terminal available
+        if [ -f "$LAUNCHER_PS1" ]; then
+            WIN_LAUNCHER_PS1="$(wslpath -w "$LAUNCHER_PS1")"
             cmd.exe /c start "" powershell.exe -ExecutionPolicy Bypass -File "$WIN_LAUNCHER_PS1" >/dev/null 2>&1 &
-        else
+        elif [ -f "$LAUNCHER_BAT" ]; then
+            WIN_LAUNCHER_BAT="$(wslpath -w "$LAUNCHER_BAT")"
             cmd.exe /c start "" "$WIN_LAUNCHER_BAT" >/dev/null 2>&1 &
         fi
     fi

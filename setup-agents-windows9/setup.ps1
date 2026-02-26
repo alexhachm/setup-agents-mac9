@@ -479,9 +479,13 @@ Copy-Item (Join-Path $ScriptDir "scripts\hooks\pre-tool-secret-guard.sh") (Join-
 Copy-Item (Join-Path $ScriptDir "scripts\hooks\stop-notify.sh") (Join-Path $hooksDir "stop-notify.sh") -Force
 Copy-Item (Join-Path $ScriptDir "scripts\state-lock.sh") (Join-Path $projectScriptsDir "state-lock.sh") -Force
 
-# Ensure WSL shell scripts are executable
+# Convert CRLF → LF and set executable for WSL shell scripts
 $projectPathWsl = Escape-BashSingleQuoted (Convert-ToWslPath $projectPath)
-& wsl.exe -e bash -lc "chmod +x '$projectPathWsl/.claude/scripts/add-worker.sh' '$projectPathWsl/.claude/scripts/signal-wait.sh' '$projectPathWsl/.claude/scripts/launch-worker.sh' '$projectPathWsl/.claude/scripts/state-lock.sh' '$projectPathWsl/.claude/hooks/pre-tool-secret-guard.sh' '$projectPathWsl/.claude/hooks/stop-notify.sh'" 2>$null
+& wsl.exe -e bash -lc "
+    for f in '$projectPathWsl'/.claude/scripts/*.sh '$projectPathWsl'/.claude/hooks/*.sh; do
+        [ -f \"\$f\" ] && sed -i 's/\r\$//' \"\$f\" && chmod +x \"\$f\"
+    done
+" 2>$null
 
 Ok "Hooks created"
 
@@ -703,12 +707,12 @@ function Get-AgentBanner([hashtable]$Agent, [bool]$ContinueMode) {
 
 function Get-WslClaudeCommand([hashtable]$Agent, [bool]$ContinueMode) {
     $cwdWsl = Escape-BashSingleQuoted (Convert-ToWslPath $Agent.cwd)
-    $teamEnv = if ($Agent.id -eq "master-1") { "" } else { "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 " }
+    $teamExport = if ($Agent.id -eq "master-1") { "" } else { "export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 && " }
     if ($ContinueMode) {
-        return "cd '$cwdWsl' && exec ${teamEnv}claude --continue --model $($Agent.model) --dangerously-skip-permissions"
+        return "cd '$cwdWsl' && ${teamExport}exec claude --continue --model $($Agent.model) --dangerously-skip-permissions"
     }
     $slashCmd = Escape-BashSingleQuoted $Agent.fresh_slash
-    return "cd '$cwdWsl' && exec ${teamEnv}claude --model $($Agent.model) --dangerously-skip-permissions '$slashCmd'"
+    return "cd '$cwdWsl' && ${teamExport}exec claude --model $($Agent.model) --dangerously-skip-permissions '$slashCmd'"
 }
 
 function Write-WslLauncherPair([hashtable]$Agent, [bool]$ContinueMode) {
@@ -717,12 +721,14 @@ function Write-WslLauncherPair([hashtable]$Agent, [bool]$ContinueMode) {
     $wslCommand = Get-WslClaudeCommand $Agent $ContinueMode
     $wslCommandEscaped = $wslCommand -replace '"', '\"'
 
+    # .ps1 launcher (PowerShell → wsl.exe → bash → claude)
     @"
 Clear-Host
 Write-Host "`n  ████  $banner  ████`n" -ForegroundColor Cyan
 & wsl.exe -e bash -lc "$wslCommandEscaped"
 "@ | Set-Content (Join-Path $launcherDir "$($Agent.id)$suffix.ps1")
 
+    # .bat launcher (cmd → wsl.exe → bash → claude)
     @"
 @echo off
 cls
@@ -731,6 +737,18 @@ echo   ████  $banner  ████
 echo.
 wsl.exe -e bash -lc "$wslCommandEscaped"
 "@ | Set-Content (Join-Path $launcherDir "$($Agent.id)$suffix.bat")
+
+    # .sh launcher (direct bash — used by GUI when Electron runs inside WSL)
+    $shContent = @"
+#!/usr/bin/env bash
+echo ""
+echo "  ████  $banner  ████"
+echo ""
+$wslCommand
+"@
+    $shPath = Join-Path $launcherDir "$($Agent.id)$suffix.sh"
+    # Write with LF line endings (Unix-style) for bash compatibility
+    [System.IO.File]::WriteAllText($shPath, ($shContent -replace "`r`n", "`n") + "`n")
 }
 
 $agentDefinitions = @(
@@ -760,7 +778,7 @@ foreach ($agent in $agentDefinitions) {
     Write-WslLauncherPair $agent $true
 }
 
-Ok "Launcher scripts written (.bat, .ps1 via WSL)"
+Ok "Launcher scripts written (.bat, .ps1, .sh via WSL)"
 
 # ── Generate manifest.json for GUI ───────────────────────────────────
 $manifestTimestamp = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
@@ -777,6 +795,8 @@ foreach ($agent in $agentDefinitions) {
         launcher_win_continue = ".claude/launchers/$($agent.id)-continue.bat"
         launcher_ps1          = ".claude/launchers/$($agent.id).ps1"
         launcher_ps1_continue = ".claude/launchers/$($agent.id)-continue.ps1"
+        launcher_sh           = ".claude/launchers/$($agent.id).sh"
+        launcher_sh_continue  = ".claude/launchers/$($agent.id)-continue.sh"
         command_fresh         = (Get-WslClaudeCommand $agent $false)
         command_continue      = (Get-WslClaudeCommand $agent $true)
     }
