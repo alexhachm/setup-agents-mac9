@@ -86,7 +86,7 @@ if [[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin* ]]; then
     else
         # No launcher files — build inline sentinel command
         WSL_PROJECT=$(echo "$PROJECT_DIR" | sed 's|^/\([a-zA-Z]\)/|/mnt/\1/|')
-        SENTINEL_CMD="export PATH=\"\$HOME/bin:\$HOME/.local/bin:\$PATH\"; bash '$WSL_PROJECT/.claude/scripts/worker-sentinel.sh' $WORKER_NUM '$WSL_PROJECT'"
+        SENTINEL_CMD="export PATH=\"\$HOME/bin:\$HOME/.local/bin:\$PATH\"; bash '$WSL_PROJECT/.claude/scripts/worker-sentinel.sh' $WORKER_NUM '$WSL_PROJECT'; exit 0"
         if command -v wt.exe &>/dev/null; then
             powershell.exe -NoProfile -Command "Start-Process wt.exe -ArgumentList 'new-tab --title \"Worker-$WORKER_NUM\" wsl.exe bash -lc \"$SENTINEL_CMD\"' -WindowStyle Minimized" &
         else
@@ -116,6 +116,8 @@ elif grep -qi microsoft /proc/version 2>/dev/null; then
     else
         LAUNCH_CMD="export PATH=\"\$HOME/bin:\$HOME/.local/bin:\$PATH\"; bash '$SENTINEL_SCRIPT' $WORKER_NUM '$PROJECT_DIR'"
     fi
+    # Ensure clean exit so WT tab auto-closes (closeOnExit: "graceful" keeps tabs on non-zero)
+    LAUNCH_CMD="$LAUNCH_CMD; exit 0"
     if command -v wt.exe &>/dev/null; then
         wt.exe -w workers new-tab --title "Worker-$WORKER_NUM" wsl.exe bash -lc "$LAUNCH_CMD" &
     elif command -v cmd.exe &>/dev/null; then

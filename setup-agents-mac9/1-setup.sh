@@ -188,6 +188,20 @@ else
     skip "fswatch/inotifywait not found — agents will use polling fallback (brew install fswatch recommended)"
 fi
 
+# On Windows, configure Windows Terminal to auto-close tabs when processes exit
+if [[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin* ]]; then
+    WT_SETTINGS="$LOCALAPPDATA/Packages/Microsoft.WindowsTerminal_8wekyb3d8bbwe/LocalState/settings.json"
+    if [ -f "$WT_SETTINGS" ]; then
+        if command -v jq &>/dev/null; then
+            current=$(jq -r '.profiles.defaults.closeOnExit // "graceful"' "$WT_SETTINGS" 2>/dev/null)
+            if [ "$current" != "always" ]; then
+                jq '.profiles.defaults.closeOnExit = "always"' "$WT_SETTINGS" > /tmp/wt-settings.json && mv /tmp/wt-settings.json "$WT_SETTINGS"
+                ok "Windows Terminal closeOnExit set to \"always\" (dead tabs auto-close)"
+            fi
+        fi
+    fi
+fi
+
 # ============================================================================
 # 1. PROJECT SETUP
 # ============================================================================
@@ -640,7 +654,8 @@ generate_launcher() {
 # Unified launcher for __ID__ — delegates to worker-sentinel.sh
 export PATH="$HOME/bin:$HOME/.local/bin:$PATH"
 PROJECT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
-exec bash "$PROJECT_DIR/.claude/scripts/worker-sentinel.sh" __NUM__ "$PROJECT_DIR"
+bash "$PROJECT_DIR/.claude/scripts/worker-sentinel.sh" __NUM__ "$PROJECT_DIR"
+exit 0
 WORKER_SH
         sed -i "s|__ID__|${id}|g; s|__NUM__|${worker_num}|g" "$sh_file"
     else
@@ -694,9 +709,9 @@ $ec = $LASTEXITCODE
 if ($ec -ne 0) {
     Write-Host ""
     Write-Host "  AGENT EXITED (code $ec)" -ForegroundColor Red
-    Write-Host "  Press Enter to close..." -ForegroundColor DarkGray
-    Read-Host | Out-Null
+    Start-Sleep -Seconds 3
 }
+exit 0
 PS1_TEMPLATE
         sed -i \
             -e "s|__ID__|${id}|g" \
