@@ -2,6 +2,22 @@
 // WITH EXTENSIVE DEBUG LOGGING
 'use strict';
 
+// Claude Code sets ELECTRON_RUN_AS_NODE=1 which forces Electron to run as
+// plain Node.js (no app, BrowserWindow, ipcMain). Strip it and re-exec.
+if (process.env.ELECTRON_RUN_AS_NODE) {
+    delete process.env.ELECTRON_RUN_AS_NODE;
+    const { execSync } = require('child_process');
+    const electronPath = require('path').join(__dirname, '..', '..', 'node_modules', '.bin', 'electron');
+    const args = ['.'].concat(process.argv.slice(2));
+    const child = require('child_process').spawn(
+        process.platform === 'win32' ? electronPath + '.cmd' : electronPath,
+        args,
+        { cwd: require('path').join(__dirname, '..', '..'), env: process.env, stdio: 'inherit', detached: true }
+    );
+    child.unref();
+    process.exit(0);
+}
+
 // Suppress EPIPE errors on stdout/stderr — these occur when the pipe
 // is closed (e.g. parent process exits) and console.log writes are
 // buffered, causing async errors that bypass synchronous try/catch.
@@ -672,15 +688,91 @@ ipcMain.handle('read-file-content', async (event, relativePath) => {
 function cleanEnv() {
     const env = { ...process.env };
     delete env.CLAUDECODE;
+    // Strip Electron/Node/npm env vars that leak into child processes
+    for (const key of Object.keys(env)) {
+        if (key.startsWith('ELECTRON_') || key.startsWith('NODE_') || key.startsWith('npm_')) {
+            delete env[key];
+        }
+    }
     return env;
 }
 
-// Read and parse the launcher manifest, handling Windows backslash paths
+// Build a PowerShell -Command string that wraps a .ps1 file with error detection.
+// If the script exits non-zero, the tab stays open showing the exit code.
+function buildPs1WithErrTrap(ps1Path, continueMode) {
+    const contArg = continueMode ? ' -Continue' : '';
+    return `-ExecutionPolicy Bypass -Command "& '${ps1Path}'${contArg}; if ($LASTEXITCODE -ne 0) { Write-Host ''; Write-Host '  AGENT EXITED (code' $LASTEXITCODE ')' -ForegroundColor Red; Read-Host '  Press Enter to close' }"`;
+}
+
+// Read and parse the launcher manifest, handling Windows backslash paths (v3 compat)
 function readManifest(manifestPath) {
     let raw = fs.readFileSync(manifestPath, 'utf-8');
-    // Fix Windows paths with unescaped backslashes in JSON
+    // Fix Windows paths with unescaped backslashes in JSON (v3 only; v4 has no paths)
     raw = raw.replace(/\\/g, '/');
     return JSON.parse(raw);
+}
+
+// Build a terminal launch command for a v4 agent (no baked paths in manifest).
+// Returns a platform-appropriate command string.
+function buildV4LaunchCmd(agent, pp, continueMode) {
+    const launcherDir = path.join(pp, '.claude', 'launchers');
+    const ps1File = path.join(launcherDir, `${agent.id}.ps1`);
+    const continueFlag = continueMode ? ' -Continue' : '';
+
+    if (process.platform === 'win32') {
+        // Windows: prefer single .ps1 with -Continue flag
+        if (fs.existsSync(ps1File)) {
+            const psArgs = buildPs1WithErrTrap(ps1File, continueMode);
+            return `where wt >nul 2>nul && wt new-tab --title ${agent.id} powershell.exe ${psArgs} || start powershell.exe ${psArgs}`;
+        }
+        // Fallback: raw cmd (shouldn't happen with proper setup)
+        const cwd = agent.worktree ? path.join(pp, agent.worktree) : pp;
+        const envPrefix = agent.env ? `set ${agent.env} && ` : '';
+        const claudeCmd = continueMode
+            ? `claude --continue --model ${agent.model} --dangerously-skip-permissions`
+            : `claude --model ${agent.model} --dangerously-skip-permissions "${agent.command}"`;
+        return `where wt >nul 2>nul && wt new-tab -d "${cwd}" --title ${agent.id} cmd /k "${envPrefix}${claudeCmd}" || start cmd /k "cd /d ${cwd} && ${envPrefix}${claudeCmd}"`;
+
+    } else {
+        // macOS/Linux: build inline command
+        const cwd = agent.worktree ? path.join(pp, agent.worktree) : pp;
+        const envPrefix = agent.env ? `${agent.env} ` : '';
+        const claudeCmd = continueMode
+            ? `${envPrefix}claude --continue --model ${agent.model} --dangerously-skip-permissions`
+            : `${envPrefix}claude --model ${agent.model} --dangerously-skip-permissions '${agent.command}'`;
+        const fullCmd = `cd '${cwd}' && ${claudeCmd}`;
+
+        if (process.platform === 'darwin') {
+            const escapedCmd = fullCmd.replace(/'/g, "'\\''");
+            return `osascript -e 'tell application "Terminal"' -e 'activate' -e 'do script "${escapedCmd}"' -e 'end tell'`;
+        } else {
+            return `which gnome-terminal >/dev/null 2>&1 && gnome-terminal -- bash -c '${fullCmd}; exec bash' || `
+                + `which konsole >/dev/null 2>&1 && konsole -e bash -c '${fullCmd}; exec bash' || `
+                + `xterm -e bash -c '${fullCmd}; exec bash'`;
+        }
+    }
+}
+
+// Build a wt.exe tab argument fragment for a v4 agent (Windows Terminal multi-tab)
+function buildV4WtTab(agent, pp, continueMode, isFirst) {
+    const launcherDir = path.join(pp, '.claude', 'launchers');
+    const ps1File = path.join(launcherDir, `${agent.id}.ps1`);
+    const continueFlag = continueMode ? ' -Continue' : '';
+    const prefix = isFirst ? '' : '; new-tab';
+
+    if (fs.existsSync(ps1File)) {
+        const psArgs = buildPs1WithErrTrap(ps1File, continueMode);
+        return `${prefix} --title ${agent.id} powershell.exe ${psArgs}`;
+    } else {
+        // Fallback for agents without .ps1
+        const cwd = agent.worktree ? path.join(pp, agent.worktree) : pp;
+        const envPrefix = agent.env ? `set ${agent.env} && ` : '';
+        const claudeCmd = continueMode
+            ? `claude --continue --model ${agent.model} --dangerously-skip-permissions`
+            : `claude --model ${agent.model} --dangerously-skip-permissions "${agent.command}"`;
+        const winCmd = `${envPrefix}${claudeCmd}`;
+        return `${prefix} -d "${cwd}" --title ${agent.id} cmd /k "${winCmd}"`;
+    }
 }
 
 // Track launched processes per project
@@ -794,47 +886,45 @@ ipcMain.handle('launch-agent', async (event, { agentId, projectPath: pp, continu
     if (!agent) return { success: false, error: `Agent ${agentId} not in manifest` };
 
     const processKey = `${pp}:${agentId}`;
-    const command = continueMode ? agent.command_continue : agent.command_fresh;
-    const cwd = agent.cwd;
+    const isV4 = (manifest.version || 0) >= 4;
 
-    debug('LAUNCH', `Launching ${agentId}`, { cwd, command, platform: process.platform });
+    debug('LAUNCH', `Launching ${agentId}`, { version: manifest.version, platform: process.platform });
 
     try {
         let terminalCmd;
 
-        if (process.platform === 'darwin') {
-            // macOS: open a new Terminal.app window
-            const escapedCmd = `cd '${cwd}' && ${command}`.replace(/'/g, "'\\''");
-            terminalCmd = `osascript -e 'tell application "Terminal"' `
-                + `-e 'activate' `
-                + `-e 'do script "${escapedCmd}"' `
-                + `-e 'end tell'`;
-
-        } else if (process.platform === 'win32') {
-            // Windows: prefer .ps1 launchers, fall back to .bat, then raw command
-            const launcherDir = path.join(pp, '.claude', 'launchers');
-            const suffix = continueMode ? '-continue' : '';
-            const ps1File = agent.launcher_ps1 ? path.join(pp, agent.launcher_ps1)
-                : path.join(launcherDir, `${agent.id}${suffix}.ps1`);
-            const batFile = agent.launcher_win ? path.join(pp, agent.launcher_win)
-                : path.join(launcherDir, `${agent.id}${suffix}.bat`);
-
-            if (fs.existsSync(ps1File)) {
-                // ps1 launchers handle their own `cd` via wsl.exe internally — no -d needed
-                terminalCmd = `where wt >nul 2>nul && wt new-tab --title ${agent.id} powershell.exe -ExecutionPolicy Bypass -File "${ps1File}" || start powershell.exe -ExecutionPolicy Bypass -File "${ps1File}"`;
-            } else if (fs.existsSync(batFile)) {
-                terminalCmd = `where wt >nul 2>nul && wt new-tab --title ${agent.id} cmd /k "${batFile}" || start cmd /k "${batFile}"`;
-            } else {
-                const winCmd = command.replace(/'/g, '"');
-                terminalCmd = `where wt >nul 2>nul && wt new-tab -d "${cwd}" --title ${agent.id} cmd /k "${winCmd}" || start cmd /k "cd /d ${cwd} && ${winCmd}"`;
-            }
-
+        if (isV4) {
+            // v4: use buildV4LaunchCmd (single .ps1 with -Continue flag)
+            terminalCmd = buildV4LaunchCmd(agent, pp, continueMode);
         } else {
-            // Linux: try common terminal emulators
-            const linuxCmd = `cd '${cwd}' && ${command}`;
-            terminalCmd = `which gnome-terminal >/dev/null 2>&1 && gnome-terminal -- bash -c '${linuxCmd}; exec bash' || `
-                + `which konsole >/dev/null 2>&1 && konsole -e bash -c '${linuxCmd}; exec bash' || `
-                + `xterm -e bash -c '${linuxCmd}; exec bash'`;
+            // v3 fallback: baked paths in manifest
+            const command = continueMode ? agent.command_continue : agent.command_fresh;
+            const cwd = agent.cwd;
+
+            if (process.platform === 'darwin') {
+                const escapedCmd = `cd '${cwd}' && ${command}`.replace(/'/g, "'\\''");
+                terminalCmd = `osascript -e 'tell application "Terminal"' `
+                    + `-e 'activate' `
+                    + `-e 'do script "${escapedCmd}"' `
+                    + `-e 'end tell'`;
+            } else if (process.platform === 'win32') {
+                const launcherDir = path.join(pp, '.claude', 'launchers');
+                const suffix = continueMode ? '-continue' : '';
+                const ps1File = path.join(launcherDir, `${agent.id}${suffix}.ps1`);
+
+                if (fs.existsSync(ps1File)) {
+                    const psArgs = buildPs1WithErrTrap(ps1File, false);
+                    terminalCmd = `where wt >nul 2>nul && wt new-tab --title ${agent.id} powershell.exe ${psArgs} || start powershell.exe ${psArgs}`;
+                } else {
+                    const winCmd = command.replace(/'/g, '"');
+                    terminalCmd = `where wt >nul 2>nul && wt new-tab -d "${cwd}" --title ${agent.id} cmd /k "${winCmd}" || start cmd /k "cd /d ${cwd} && ${winCmd}"`;
+                }
+            } else {
+                const linuxCmd = `cd '${cwd}' && ${command}`;
+                terminalCmd = `which gnome-terminal >/dev/null 2>&1 && gnome-terminal -- bash -c '${linuxCmd}; exec bash' || `
+                    + `which konsole >/dev/null 2>&1 && konsole -e bash -c '${linuxCmd}; exec bash' || `
+                    + `xterm -e bash -c '${linuxCmd}; exec bash'`;
+            }
         }
 
         exec(terminalCmd, { env: cleanEnv() }, (error) => {
@@ -851,7 +941,7 @@ ipcMain.handle('launch-agent', async (event, { agentId, projectPath: pp, continu
         });
 
         debug('LAUNCH', `Launched ${agentId} successfully`);
-        return { success: true, agentId, cwd };
+        return { success: true, agentId };
 
     } catch (e) {
         debug('LAUNCH', `Failed to launch ${agentId}`, { error: e.message });
@@ -873,6 +963,7 @@ ipcMain.handle('launch-group', async (event, { group, projectPath: pp, continueM
 
     const agents = manifest.agents.filter(a => a.group === group);
     const results = [];
+    const isV4 = (manifest.version || 0) >= 4;
 
     for (const agent of agents) {
         // Stagger launches by 2 seconds to avoid race conditions
@@ -880,36 +971,39 @@ ipcMain.handle('launch-group', async (event, { group, projectPath: pp, continueM
             await new Promise(resolve => setTimeout(resolve, 2000));
         }
 
-        const command = continueMode ? agent.command_continue : agent.command_fresh;
-        const cwd = agent.cwd;
         let terminalCmd;
 
-        if (process.platform === 'darwin') {
-            const escapedCmd = `cd '${cwd}' && ${command}`.replace(/'/g, "'\\''");
-            terminalCmd = `osascript -e 'tell application "Terminal"' `
-                + `-e 'activate' `
-                + `-e 'do script "${escapedCmd}"' `
-                + `-e 'end tell'`;
-        } else if (process.platform === 'win32') {
-            const launcherDir = path.join(pp, '.claude', 'launchers');
-            const suffix = continueMode ? '-continue' : '';
-            const ps1File = agent.launcher_ps1 ? path.join(pp, agent.launcher_ps1)
-                : path.join(launcherDir, `${agent.id}${suffix}.ps1`);
-            const batFile = path.join(launcherDir, `${agent.id}${suffix}.bat`);
-
-            if (fs.existsSync(ps1File)) {
-                terminalCmd = `where wt >nul 2>nul && wt new-tab --title ${agent.id} powershell.exe -ExecutionPolicy Bypass -File "${ps1File}" || start powershell.exe -ExecutionPolicy Bypass -File "${ps1File}"`;
-            } else if (fs.existsSync(batFile)) {
-                terminalCmd = `where wt >nul 2>nul && wt new-tab --title ${agent.id} cmd /k "${batFile}" || start cmd /k "${batFile}"`;
-            } else {
-                const winCmd = command.replace(/'/g, '"');
-                terminalCmd = `where wt >nul 2>nul && wt new-tab -d "${cwd}" --title ${agent.id} cmd /k "${winCmd}" || start cmd /k "cd /d ${cwd} && ${winCmd}"`;
-            }
+        if (isV4) {
+            terminalCmd = buildV4LaunchCmd(agent, pp, continueMode);
         } else {
-            const linuxCmd = `cd '${cwd}' && ${command}`;
-            terminalCmd = `which gnome-terminal >/dev/null 2>&1 && gnome-terminal -- bash -c '${linuxCmd}; exec bash' || `
-                + `which konsole >/dev/null 2>&1 && konsole -e bash -c '${linuxCmd}; exec bash' || `
-                + `xterm -e bash -c '${linuxCmd}; exec bash'`;
+            // v3 fallback
+            const command = continueMode ? agent.command_continue : agent.command_fresh;
+            const cwd = agent.cwd;
+
+            if (process.platform === 'darwin') {
+                const escapedCmd = `cd '${cwd}' && ${command}`.replace(/'/g, "'\\''");
+                terminalCmd = `osascript -e 'tell application "Terminal"' `
+                    + `-e 'activate' `
+                    + `-e 'do script "${escapedCmd}"' `
+                    + `-e 'end tell'`;
+            } else if (process.platform === 'win32') {
+                const launcherDir = path.join(pp, '.claude', 'launchers');
+                const suffix = continueMode ? '-continue' : '';
+                const ps1File = path.join(launcherDir, `${agent.id}${suffix}.ps1`);
+
+                if (fs.existsSync(ps1File)) {
+                    const psArgs = buildPs1WithErrTrap(ps1File, false);
+                    terminalCmd = `where wt >nul 2>nul && wt new-tab --title ${agent.id} powershell.exe ${psArgs} || start powershell.exe ${psArgs}`;
+                } else {
+                    const winCmd = command.replace(/'/g, '"');
+                    terminalCmd = `where wt >nul 2>nul && wt new-tab -d "${cwd}" --title ${agent.id} cmd /k "${winCmd}" || start cmd /k "cd /d ${cwd} && ${winCmd}"`;
+                }
+            } else {
+                const linuxCmd = `cd '${cwd}' && ${command}`;
+                terminalCmd = `which gnome-terminal >/dev/null 2>&1 && gnome-terminal -- bash -c '${linuxCmd}; exec bash' || `
+                    + `which konsole >/dev/null 2>&1 && konsole -e bash -c '${linuxCmd}; exec bash' || `
+                    + `xterm -e bash -c '${linuxCmd}; exec bash'`;
+            }
         }
 
         exec(terminalCmd, { env: cleanEnv() }, (error) => {
@@ -957,16 +1051,22 @@ ipcMain.handle('launch-group-tabbed-wt', async (event, { group, projectPath: pp,
     const agents = manifest.agents.filter(a => a.group === group);
     if (agents.length === 0) return { success: false, error: 'No agents in group' };
 
-    // Build a single Windows Terminal command with multiple tabs using .ps1 launchers
-    // ps1 launchers handle their own `cd` via wsl.exe — no -d needed (avoids WSL UNC path errors)
+    const isV4 = (manifest.version || 0) >= 4;
+
+    // Build a single Windows Terminal command with multiple tabs
     const tabArgs = agents.map((agent, i) => {
+        if (isV4) {
+            return buildV4WtTab(agent, pp, continueMode, i === 0);
+        }
+        // v3 fallback
         const launcherDir = path.join(pp, '.claude', 'launchers');
         const suffix = continueMode ? '-continue' : '';
         const ps1File = path.join(launcherDir, `${agent.id}${suffix}.ps1`);
         const prefix = i === 0 ? '' : '; new-tab';
 
         if (fs.existsSync(ps1File)) {
-            return `${prefix} --title ${agent.id} powershell.exe -ExecutionPolicy Bypass -File "${ps1File}"`;
+            const psArgs = buildPs1WithErrTrap(ps1File, false);
+            return `${prefix} --title ${agent.id} powershell.exe ${psArgs}`;
         } else {
             const cmd = continueMode ? agent.command_continue : agent.command_fresh;
             const winCmd = cmd.replace(/'/g, '"');
@@ -1006,15 +1106,21 @@ ipcMain.handle('launch-all-tabbed-wt', async (event, { projectPath: pp, continue
     const agents = manifest.agents;
     if (agents.length === 0) return { success: false, error: 'No agents in manifest' };
 
-    const launcherDir = path.join(pp, '.claude', 'launchers');
-    const suffix = continueMode ? '-continue' : '';
+    const isV4 = (manifest.version || 0) >= 4;
 
     const tabArgs = agents.map((agent, i) => {
+        if (isV4) {
+            return buildV4WtTab(agent, pp, continueMode, i === 0);
+        }
+        // v3 fallback
+        const launcherDir = path.join(pp, '.claude', 'launchers');
+        const suffix = continueMode ? '-continue' : '';
         const ps1File = path.join(launcherDir, `${agent.id}${suffix}.ps1`);
         const prefix = i === 0 ? '' : '; new-tab';
 
         if (fs.existsSync(ps1File)) {
-            return `${prefix} --title ${agent.id} powershell.exe -ExecutionPolicy Bypass -File "${ps1File}"`;
+            const psArgs = buildPs1WithErrTrap(ps1File, false);
+            return `${prefix} --title ${agent.id} powershell.exe ${psArgs}`;
         } else {
             const cmd = continueMode ? agent.command_continue : agent.command_fresh;
             const winCmd = cmd.replace(/'/g, '"');
