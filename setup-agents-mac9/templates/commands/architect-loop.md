@@ -186,6 +186,10 @@ Go to Step 6.
      "request_id": "[id]"
    }
    TASK
+   # CRITICAL: Also copy into the worker's worktree — workers run from .worktrees/wt-N/
+   # and read tasks relative to their own cwd, not the main repo root
+   mkdir -p .worktrees/wt-N/.claude/state/tasks
+   cp .claude/state/tasks/worker-N.json .worktrees/wt-N/.claude/state/tasks/worker-N.json
    ```
    Use the same content you passed to TaskCreate above. The task file is the cross-session handoff; TaskCreate is only for your own local tracking.
 7. **Launch or signal the worker:**

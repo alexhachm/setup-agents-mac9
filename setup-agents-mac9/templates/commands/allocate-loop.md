@@ -140,6 +140,10 @@ If file contains a fix task:
      "priority": "urgent"
    }
    TASK
+   # CRITICAL: Also copy into the worker's worktree — workers run from .worktrees/wt-N/
+   # and read tasks relative to their own cwd, not the main repo root
+   mkdir -p .worktrees/wt-N/.claude/state/tasks
+   cp .claude/state/tasks/worker-N.json .worktrees/wt-N/.claude/state/tasks/worker-N.json
    ```
 3. Clear fix-queue.json
 4. Update worker-status.json with the task assignment
@@ -183,6 +187,10 @@ If there are tasks to allocate:
      "request_id": "[id]"
    }
    TASK
+   # CRITICAL: Also copy into the worker's worktree — workers run from .worktrees/wt-N/
+   # and read tasks relative to their own cwd, not the main repo root
+   mkdir -p .worktrees/wt-N/.claude/state/tasks
+   cp .claude/state/tasks/worker-N.json .worktrees/wt-N/.claude/state/tasks/worker-N.json
    ```
    Use the same content you passed to TaskCreate. The task file is the cross-session handoff; TaskCreate is only for your own local tracking.
 7. Update worker-status.json (use lock helper)
