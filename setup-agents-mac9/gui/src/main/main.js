@@ -697,13 +697,6 @@ function cleanEnv() {
     return env;
 }
 
-// Build a PowerShell -Command string that wraps a .ps1 file with error detection.
-// If the script exits non-zero, the tab stays open showing the exit code.
-function buildPs1WithErrTrap(ps1Path, continueMode) {
-    const contArg = continueMode ? ' -Continue' : '';
-    return `-ExecutionPolicy Bypass -Command "& '${ps1Path}'${contArg}; if ($LASTEXITCODE -ne 0) { Write-Host ''; Write-Host '  AGENT EXITED (code' $LASTEXITCODE ')' -ForegroundColor Red; Read-Host '  Press Enter to close' }"`;
-}
-
 // Read and parse the launcher manifest, handling Windows backslash paths (v3 compat)
 function readManifest(manifestPath) {
     let raw = fs.readFileSync(manifestPath, 'utf-8');
@@ -714,18 +707,20 @@ function readManifest(manifestPath) {
 
 // Build a terminal launch command for a v4 agent (no baked paths in manifest).
 // Returns a platform-appropriate command string.
+// Prefers unified .sh launcher files when available (v6+), falls back to inline.
 function buildV4LaunchCmd(agent, pp, continueMode) {
     const launcherDir = path.join(pp, '.claude', 'launchers');
     const ps1File = path.join(launcherDir, `${agent.id}.ps1`);
+    const shFile = path.join(launcherDir, `${agent.id}.sh`);
     const continueFlag = continueMode ? ' -Continue' : '';
+    const shContinueArg = continueMode ? ' --continue' : '';
 
     if (process.platform === 'win32') {
-        // Windows: prefer single .ps1 with -Continue flag
+        // Windows: prefer .ps1 wrapper (which delegates to .sh via WSL)
         if (fs.existsSync(ps1File)) {
-            const psArgs = buildPs1WithErrTrap(ps1File, continueMode);
-            return `where wt >nul 2>nul && wt new-tab --title ${agent.id} powershell.exe ${psArgs} || start powershell.exe ${psArgs}`;
+            return `where wt >nul 2>nul && wt new-tab --title ${agent.id} powershell.exe -ExecutionPolicy Bypass -File "${ps1File}"${continueFlag} || start powershell.exe -ExecutionPolicy Bypass -File "${ps1File}"${continueFlag}`;
         }
-        // Fallback: raw cmd (shouldn't happen with proper setup)
+        // Fallback: raw cmd (pre-v6 projects without .ps1)
         const cwd = agent.worktree ? path.join(pp, agent.worktree) : pp;
         const envPrefix = agent.env ? `set ${agent.env} && ` : '';
         const claudeCmd = continueMode
@@ -734,7 +729,20 @@ function buildV4LaunchCmd(agent, pp, continueMode) {
         return `where wt >nul 2>nul && wt new-tab -d "${cwd}" --title ${agent.id} cmd /k "${envPrefix}${claudeCmd}" || start cmd /k "cd /d ${cwd} && ${envPrefix}${claudeCmd}"`;
 
     } else {
-        // macOS/Linux: build inline command
+        // macOS/Linux: prefer .sh launcher file when available
+        if (fs.existsSync(shFile)) {
+            const shCmd = `bash '${shFile}'${shContinueArg}`;
+            if (process.platform === 'darwin') {
+                const escapedCmd = shCmd.replace(/'/g, "'\\''");
+                return `osascript -e 'tell application "Terminal"' -e 'activate' -e 'do script "${escapedCmd}"' -e 'end tell'`;
+            } else {
+                return `which gnome-terminal >/dev/null 2>&1 && gnome-terminal -- bash -c '${shCmd}; exec bash' || `
+                    + `which konsole >/dev/null 2>&1 && konsole -e bash -c '${shCmd}; exec bash' || `
+                    + `xterm -e bash -c '${shCmd}; exec bash'`;
+            }
+        }
+
+        // Fallback: inline command (pre-v6 projects without .sh)
         const cwd = agent.worktree ? path.join(pp, agent.worktree) : pp;
         const envPrefix = agent.env ? `${agent.env} ` : '';
         const claudeCmd = continueMode
@@ -761,8 +769,7 @@ function buildV4WtTab(agent, pp, continueMode, isFirst) {
     const prefix = isFirst ? '' : '; new-tab';
 
     if (fs.existsSync(ps1File)) {
-        const psArgs = buildPs1WithErrTrap(ps1File, continueMode);
-        return `${prefix} --title ${agent.id} powershell.exe ${psArgs}`;
+        return `${prefix} --title ${agent.id} powershell.exe -ExecutionPolicy Bypass -File "${ps1File}"${continueFlag}`;
     } else {
         // Fallback for agents without .ps1
         const cwd = agent.worktree ? path.join(pp, agent.worktree) : pp;
@@ -913,8 +920,7 @@ ipcMain.handle('launch-agent', async (event, { agentId, projectPath: pp, continu
                 const ps1File = path.join(launcherDir, `${agent.id}${suffix}.ps1`);
 
                 if (fs.existsSync(ps1File)) {
-                    const psArgs = buildPs1WithErrTrap(ps1File, false);
-                    terminalCmd = `where wt >nul 2>nul && wt new-tab --title ${agent.id} powershell.exe ${psArgs} || start powershell.exe ${psArgs}`;
+                    terminalCmd = `where wt >nul 2>nul && wt new-tab --title ${agent.id} powershell.exe -ExecutionPolicy Bypass -File "${ps1File}" || start powershell.exe -ExecutionPolicy Bypass -File "${ps1File}"`;
                 } else {
                     const winCmd = command.replace(/'/g, '"');
                     terminalCmd = `where wt >nul 2>nul && wt new-tab -d "${cwd}" --title ${agent.id} cmd /k "${winCmd}" || start cmd /k "cd /d ${cwd} && ${winCmd}"`;
@@ -992,8 +998,7 @@ ipcMain.handle('launch-group', async (event, { group, projectPath: pp, continueM
                 const ps1File = path.join(launcherDir, `${agent.id}${suffix}.ps1`);
 
                 if (fs.existsSync(ps1File)) {
-                    const psArgs = buildPs1WithErrTrap(ps1File, false);
-                    terminalCmd = `where wt >nul 2>nul && wt new-tab --title ${agent.id} powershell.exe ${psArgs} || start powershell.exe ${psArgs}`;
+                    terminalCmd = `where wt >nul 2>nul && wt new-tab --title ${agent.id} powershell.exe -ExecutionPolicy Bypass -File "${ps1File}" || start powershell.exe -ExecutionPolicy Bypass -File "${ps1File}"`;
                 } else {
                     const winCmd = command.replace(/'/g, '"');
                     terminalCmd = `where wt >nul 2>nul && wt new-tab -d "${cwd}" --title ${agent.id} cmd /k "${winCmd}" || start cmd /k "cd /d ${cwd} && ${winCmd}"`;
@@ -1065,8 +1070,7 @@ ipcMain.handle('launch-group-tabbed-wt', async (event, { group, projectPath: pp,
         const prefix = i === 0 ? '' : '; new-tab';
 
         if (fs.existsSync(ps1File)) {
-            const psArgs = buildPs1WithErrTrap(ps1File, false);
-            return `${prefix} --title ${agent.id} powershell.exe ${psArgs}`;
+            return `${prefix} --title ${agent.id} powershell.exe -ExecutionPolicy Bypass -File "${ps1File}"`;
         } else {
             const cmd = continueMode ? agent.command_continue : agent.command_fresh;
             const winCmd = cmd.replace(/'/g, '"');
@@ -1119,8 +1123,7 @@ ipcMain.handle('launch-all-tabbed-wt', async (event, { projectPath: pp, continue
         const prefix = i === 0 ? '' : '; new-tab';
 
         if (fs.existsSync(ps1File)) {
-            const psArgs = buildPs1WithErrTrap(ps1File, false);
-            return `${prefix} --title ${agent.id} powershell.exe ${psArgs}`;
+            return `${prefix} --title ${agent.id} powershell.exe -ExecutionPolicy Bypass -File "${ps1File}"`;
         } else {
             const cmd = continueMode ? agent.command_continue : agent.command_fresh;
             const winCmd = cmd.replace(/'/g, '"');

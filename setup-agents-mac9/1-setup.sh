@@ -593,56 +593,73 @@ step "Generating launcher scripts and manifest..."
 launcher_dir="$project_path/.claude/launchers"
 mkdir -p "$launcher_dir"
 
-# ── Helper: generate a self-contained .ps1 launcher (Windows only) ────
-# Each .ps1 derives all paths at runtime from $PSScriptRoot (the launchers/ dir).
-# No baked-in paths — works regardless of which shell ran setup.
-generate_ps1() {
-    local id="$1" label="$2" color="$3" model="$4" command="$5" env_prefix="$6" worktree_rel="$7"
+# ── Helper: generate unified .sh + .ps1 launcher for any agent ────────
+# .sh file (ALL platforms): self-contained bash script with PATH setup, cd, claude invocation
+# .ps1 file (Windows only): thin wrapper that derives WSL path → wsl.exe bash -l <id>.sh
+# Usage: generate_launcher <id> <model> <command> <env_prefix> <label> <color>
+#   Workers (id=worker-N) auto-detect and delegate to worker-sentinel.sh
+generate_launcher() {
+    local id="$1" model="$2" command="$3" env_prefix="$4" label="$5" color="$6"
+    local sh_file="$launcher_dir/${id}.sh"
     local ps1_file="$launcher_dir/${id}.ps1"
 
-    # Build the cd target: project root, or project root + worktree relative path
-    local cd_expr='$WslProject'
-    if [ -n "$worktree_rel" ]; then
-        cd_expr='$WslProject/'"$worktree_rel"
-    fi
-
-    # Build the claude invocation for fresh mode
-    local fresh_cmd=""
-    if [ -n "$env_prefix" ]; then
-        fresh_cmd="env ${env_prefix} claude --model ${model} --dangerously-skip-permissions '${command}'"
+    # ── .sh launcher (all platforms) ──────────────────────────────────
+    if [[ "$id" == worker-* ]]; then
+        local worker_num="${id#worker-}"
+        cat > "$sh_file" << 'WORKER_SH'
+#!/usr/bin/env bash
+# Unified launcher for __ID__ — delegates to worker-sentinel.sh
+export PATH="$HOME/bin:$HOME/.local/bin:$PATH"
+PROJECT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+exec bash "$PROJECT_DIR/.claude/scripts/worker-sentinel.sh" __NUM__ "$PROJECT_DIR"
+WORKER_SH
+        sed -i "s|__ID__|${id}|g; s|__NUM__|${worker_num}|g" "$sh_file"
     else
-        fresh_cmd="claude --model ${model} --dangerously-skip-permissions '${command}'"
+        cat > "$sh_file" << 'MASTER_SH'
+#!/usr/bin/env bash
+# Unified launcher for __ID__
+export PATH="$HOME/bin:$HOME/.local/bin:$PATH"
+PROJECT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+cd "$PROJECT_DIR" || exit 1
+__ENV_LINE__
+if [[ "$1" == "--continue" ]]; then
+    exec claude --continue --model __MODEL__ --dangerously-skip-permissions
+else
+    exec claude --model __MODEL__ --dangerously-skip-permissions '__COMMAND__'
+fi
+MASTER_SH
+        local env_line=""
+        [ -n "$env_prefix" ] && env_line="export ${env_prefix}"
+        sed -i \
+            -e "s|__ID__|${id}|g" \
+            -e "s|__MODEL__|${model}|g" \
+            -e "s|__COMMAND__|${command}|g" \
+            -e "s|__ENV_LINE__|${env_line}|g" \
+            "$sh_file"
     fi
+    # Ensure LF line endings + executable
+    sed -i 's/\r$//' "$sh_file"
+    chmod +x "$sh_file" 2>/dev/null || true
 
-    # Build the claude invocation for continue mode
-    local continue_cmd=""
-    if [ -n "$env_prefix" ]; then
-        continue_cmd="env ${env_prefix} claude --continue --model ${model} --dangerously-skip-permissions"
-    else
-        continue_cmd="claude --continue --model ${model} --dangerously-skip-permissions"
-    fi
-
-    # Write the .ps1 using a QUOTED heredoc (no shell expansion — avoids backtick/dollar conflicts).
-    # Then replace __PLACEHOLDERS__ with actual values via sed.
-    # PowerShell backtick-dollar (`$) passes literal $ to bash (not expanded by PS).
-    # PowerShell $WslProject IS expanded (defined earlier in the script).
-    cat > "$ps1_file" << 'PS1_TEMPLATE'
-# v4 self-contained launcher for __ID__
+    # ── .ps1 wrapper (Windows only) ───────────────────────────────────
+    # Identical template for all agents: derive WSL path → bash -l <id>.sh [--continue]
+    if [[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin* ]]; then
+        cat > "$ps1_file" << 'PS1_TEMPLATE'
+# Unified launcher for __ID__
 # DO NOT add non-ASCII chars. PowerShell 5.1 reads without UTF-8 BOM.
 param([switch]$Continue)
 
-# Derive project root from this script location (launchers/ is inside .claude/)
 $ProjectDir = (Resolve-Path "$PSScriptRoot\..\..").Path
-# Convert Windows path to WSL path in pure PowerShell (avoids wsl.exe backslash-eating bug)
 $WslProject = '/mnt/' + $ProjectDir.Substring(0,1).ToLower() + $ProjectDir.Substring(2).Replace('\','/')
+$ShFile = "$WslProject/.claude/launchers/__ID__.sh"
 
 Clear-Host
+Write-Host "  __LABEL__" -ForegroundColor __COLOR__
 if ($Continue) {
-    Write-Host "  __LABEL__ [CONTINUE]" -ForegroundColor __COLOR__
-    wsl.exe bash -lc "cd '__CD_EXPR__' && __CONTINUE_CMD__"
+    Write-Host "  [CONTINUE MODE]" -ForegroundColor DarkGray
+    wsl.exe bash -l $ShFile --continue
 } else {
-    Write-Host "  __LABEL__" -ForegroundColor __COLOR__
-    wsl.exe bash -lc "cd '__CD_EXPR__' && __FRESH_CMD__"
+    wsl.exe bash -l $ShFile
 }
 $ec = $LASTEXITCODE
 if ($ec -ne 0) {
@@ -652,77 +669,33 @@ if ($ec -ne 0) {
     Read-Host | Out-Null
 }
 PS1_TEMPLATE
-    # Replace placeholders with actual values + convert to CRLF
-    sed -i \
-        -e "s|__ID__|${id}|g" \
-        -e "s|__LABEL__|${label}|g" \
-        -e "s|__COLOR__|${color}|g" \
-        -e "s|__CD_EXPR__|${cd_expr}|g" \
-        -e "s|__CONTINUE_CMD__|${continue_cmd}|g" \
-        -e "s|__FRESH_CMD__|${fresh_cmd}|g" \
-        -e 's/$/\r/' \
-        "$ps1_file"
+        sed -i \
+            -e "s|__ID__|${id}|g" \
+            -e "s|__LABEL__|${label}|g" \
+            -e "s|__COLOR__|${color}|g" \
+            -e 's/$/\r/' \
+            "$ps1_file"
+    fi
 }
 
-# ── Helper: generate a sentinel .ps1 for workers (persistent loop) ────
-# Unlike master .ps1 (one-shot), worker .ps1 delegates to worker-sentinel.sh
-# which loops forever: idle-wait → run claude → loop back. One terminal, reused.
-generate_sentinel_ps1() {
-    local worker_num="$1"
-    local ps1_file="$launcher_dir/worker-${worker_num}.ps1"
+# ── Generate launchers for all agents (all platforms) ─────────────────
+step "Generating .sh launchers (+ .ps1 on Windows)..."
 
-    cat > "$ps1_file" << 'PS1_SENTINEL'
-# v5 sentinel launcher for __ID__
-# DO NOT add non-ASCII chars. PowerShell 5.1 reads without UTF-8 BOM.
-# Persistent loop: idle-wait -> run claude -> loop back. One terminal, reused forever.
+generate_launcher "master-1" "sonnet" "/master-loop" "" \
+    "I AM MASTER-1 -- YOUR INTERFACE (Sonnet)" "Cyan"
 
-$ProjectDir = (Resolve-Path "$PSScriptRoot\..\..").Path
-$WslProject = '/mnt/' + $ProjectDir.Substring(0,1).ToLower() + $ProjectDir.Substring(2).Replace('\','/')
+generate_launcher "master-2" "opus" "/scan-codebase" "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1" \
+    "I AM MASTER-2 -- ARCHITECT (Opus)" "Cyan"
 
-Clear-Host
-Write-Host "  __ID_UPPER__ SENTINEL" -ForegroundColor Green
-# Delegate to bash sentinel script (cross-platform logic lives there)
-wsl.exe bash -lc "export PATH=`"`$HOME/bin:`$HOME/.local/bin:`$PATH`"; bash '$WslProject/.claude/scripts/worker-sentinel.sh' __NUM__ '$WslProject'"
-$ec = $LASTEXITCODE
-if ($ec -ne 0) {
-    Write-Host ""
-    Write-Host "  SENTINEL EXITED (code $ec)" -ForegroundColor Red
-    Write-Host "  Press Enter to close..." -ForegroundColor DarkGray
-    Read-Host | Out-Null
-}
-PS1_SENTINEL
+generate_launcher "master-3" "sonnet" "/scan-codebase-allocator" "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1" \
+    "I AM MASTER-3 -- ALLOCATOR (Sonnet)" "Yellow"
 
-    local id_upper
-    id_upper=$(echo "WORKER-${worker_num}" | tr '[:lower:]' '[:upper:]')
-    sed -i \
-        -e "s|__ID__|worker-${worker_num}|g" \
-        -e "s|__ID_UPPER__|${id_upper}|g" \
-        -e "s|__NUM__|${worker_num}|g" \
-        -e 's/$/\r/' \
-        "$ps1_file"
-}
+for i in $(seq 1 $worker_count); do
+    generate_launcher "worker-$i" "opus" "/worker-loop" "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1" \
+        "WORKER-$i SENTINEL" "Green"
+done
 
-# ── Generate .ps1 launchers (Windows only) ────────────────────────────
-if [[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin* ]]; then
-    step "Generating .ps1 launchers (v5 — masters one-shot, workers sentinel)..."
-
-    # Masters: one-shot .ps1 (unchanged from v4)
-    generate_ps1 "master-1" "I AM MASTER-1 -- YOUR INTERFACE (Sonnet)" "Cyan" \
-        "sonnet" "/master-loop" "" ""
-
-    generate_ps1 "master-2" "I AM MASTER-2 -- ARCHITECT (Opus)" "Cyan" \
-        "opus" "/scan-codebase" "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1" ""
-
-    generate_ps1 "master-3" "I AM MASTER-3 -- ALLOCATOR (Sonnet)" "Yellow" \
-        "sonnet" "/scan-codebase-allocator" "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1" ""
-
-    # Workers: sentinel .ps1 (persistent loop — one terminal, reused forever)
-    for i in $(seq 1 $worker_count); do
-        generate_sentinel_ps1 "$i"
-    done
-
-    ok ".ps1 launchers generated (v5 — sentinel workers, zero baked paths)"
-fi
+ok "Launchers generated (.sh on all platforms, .ps1 on Windows)"
 
 # ── Generate v4 manifest.json for GUI ─────────────────────────────────
 # v4 manifest has NO filesystem paths — only agent identity, model, command, worktree relative dir.
@@ -894,33 +867,21 @@ HEALTH
     fi
 
     # ==================================================================
-    # TERMINAL LAUNCH (v4 — .ps1 on Windows, inline commands elsewhere)
+    # TERMINAL LAUNCH (v6 — unified .sh launchers on all platforms)
     # ==================================================================
     step "Launching terminals..."
 
     launcher_dir="$project_path/.claude/launchers"
     continue_flag=""
+    sh_continue_arg=""
     if [ -n "$CLAUDE_SESSION_FLAG" ]; then
         continue_flag="-Continue"
+        sh_continue_arg="--continue"
     fi
-
-    # Helper: build a claude command string from manifest-style args
-    # Usage: build_claude_cmd <model> <command|""> <env|""> <continue:0|1>
-    build_claude_cmd() {
-        local model="$1" cmd="$2" env_prefix="$3" is_continue="$4"
-        local parts=""
-        [ -n "$env_prefix" ] && parts="env $env_prefix "
-        if [ "$is_continue" = "1" ]; then
-            parts="${parts}claude --continue --model $model --dangerously-skip-permissions"
-        else
-            parts="${parts}claude --model $model --dangerously-skip-permissions '$cmd'"
-        fi
-        echo "$parts"
-    }
 
     # ── Platform-specific terminal creation ───────────────────────────
     if [[ "$OSTYPE" == darwin* ]]; then
-        # ── macOS: build inline commands from manifest data ──────────
+        # ── macOS: run .sh launcher files via Terminal.app ──────────
         merge_visible_windows() {
             osascript << 'MERGE_SCRIPT'
 tell application "Terminal" to activate
@@ -933,11 +894,9 @@ end tell
 MERGE_SCRIPT
         }
 
-        is_cont=0; [ -n "$CLAUDE_SESSION_FLAG" ] && is_cont=1
-
-        m2_cmd="cd '$project_path' && $(build_claude_cmd opus /scan-codebase CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 $is_cont)"
-        m3_cmd="cd '$project_path' && $(build_claude_cmd sonnet /scan-codebase-allocator CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 $is_cont)"
-        m1_cmd="cd '$project_path' && $(build_claude_cmd sonnet /master-loop '' $is_cont)"
+        m2_cmd="bash '$launcher_dir/master-2.sh' $sh_continue_arg"
+        m3_cmd="bash '$launcher_dir/master-3.sh' $sh_continue_arg"
+        m1_cmd="bash '$launcher_dir/master-1.sh' $sh_continue_arg"
 
         step "  Preparing setup window..."
         SETUP_WIN_ID=$(osascript -e 'tell application "Terminal" to return id of front window')
@@ -978,11 +937,10 @@ MERGE_SCRIPT
 
         # ── Launch worker sentinels (minimized) ──
         step "  Launching worker sentinels (minimized)..."
-        sentinel_script="$project_path/.claude/scripts/worker-sentinel.sh"
         for i in $(seq 1 $worker_count); do
-            sentinel_cmd="export PATH=\"\$HOME/bin:\$HOME/.local/bin:\$PATH\"; bash '$sentinel_script' $i '$project_path'"
+            worker_sh="$launcher_dir/worker-$i.sh"
             osascript -e "tell application \"Terminal\"
-                do script \"$sentinel_cmd\"
+                do script \"bash '$worker_sh'\"
             end tell"
             sleep 1
         done
@@ -1007,7 +965,7 @@ MERGE_SCRIPT
         ok "  All windows restored"
 
     elif [[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin* ]]; then
-        # ── Windows: use .ps1 launchers with optional -Continue flag ──
+        # ── Windows: use .ps1 wrappers (which delegate to .sh via WSL) ──
         step "  Launching master terminals..."
 
         win_launcher_dir=$(cygpath -w "$launcher_dir" 2>/dev/null || echo "$launcher_dir" | sed 's|/|\\|g')
@@ -1018,11 +976,9 @@ MERGE_SCRIPT
                    new-tab --title "Master-3 Allocator" powershell.exe -ExecutionPolicy Bypass -File "$win_launcher_dir\\master-3.ps1" $continue_flag \; \
                    new-tab --title "Master-1 Interface" powershell.exe -ExecutionPolicy Bypass -File "$win_launcher_dir\\master-1.ps1" $continue_flag &
             sleep 3
-            ok "  3 master tabs opened in Windows Terminal (v5 .ps1)"
+            ok "  3 master tabs opened in Windows Terminal"
 
             # ── Launch worker sentinels in a SEPARATE MINIMIZED WT window ──
-            # Each worker gets a persistent sentinel tab. Masters wake them via
-            # touch .claude/signals/.worker-N-wake (no new terminals ever spawned).
             step "  Launching worker sentinels (minimized)..."
             worker_tabs=""
             for i in $(seq 1 $worker_count); do
@@ -1031,21 +987,19 @@ MERGE_SCRIPT
                 fi
                 worker_tabs="${worker_tabs}new-tab --title Worker-$i powershell.exe -ExecutionPolicy Bypass -File ${win_launcher_dir}\\worker-${i}.ps1"
             done
-            # Start-Process with -WindowStyle Minimized keeps the WT window in the taskbar
             powershell.exe -NoProfile -Command "Start-Process wt.exe -ArgumentList '$worker_tabs' -WindowStyle Minimized"
             sleep 2
             ok "  $worker_count worker sentinels launched (minimized, persistent)"
         else
-            # Fallback: use start to open separate PowerShell windows
+            # Fallback: separate PowerShell windows
             start powershell.exe -ExecutionPolicy Bypass -File "$win_launcher_dir\\master-2.ps1" $continue_flag &
             sleep 1
             start powershell.exe -ExecutionPolicy Bypass -File "$win_launcher_dir\\master-3.ps1" $continue_flag &
             sleep 1
             start powershell.exe -ExecutionPolicy Bypass -File "$win_launcher_dir\\master-1.ps1" $continue_flag &
             sleep 1
-            ok "  3 master windows opened (separate PowerShell windows)"
+            ok "  3 master windows opened"
 
-            # Launch worker sentinels (separate windows, no WT minimized support)
             step "  Launching worker sentinels..."
             for i in $(seq 1 $worker_count); do
                 start powershell.exe -ExecutionPolicy Bypass -File "$win_launcher_dir\\worker-${i}.ps1" &
@@ -1055,17 +1009,12 @@ MERGE_SCRIPT
         fi
 
     else
-        # ── Linux: build inline commands from manifest data ──────────
+        # ── Linux: run .sh launcher files in terminal emulators ──────
         step "  Launching master terminals..."
 
-        is_cont=0; [ -n "$CLAUDE_SESSION_FLAG" ] && is_cont=1
-
-        m2_cmd="cd '$project_path' && $(build_claude_cmd opus /scan-codebase CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 $is_cont)"
-        m3_cmd="cd '$project_path' && $(build_claude_cmd sonnet /scan-codebase-allocator CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 $is_cont)"
-        m1_cmd="cd '$project_path' && $(build_claude_cmd sonnet /master-loop '' $is_cont)"
-
         launch_in_terminal() {
-            local title="$1" cmd="$2"
+            local title="$1" sh_file="$2" args="$3"
+            local cmd="bash '$sh_file' $args"
             if command -v gnome-terminal &>/dev/null; then
                 gnome-terminal --title="$title" -- bash -lc "$cmd; exec bash" &
             elif command -v konsole &>/dev/null; then
@@ -1079,21 +1028,19 @@ MERGE_SCRIPT
             fi
         }
 
-        launch_in_terminal "Master-2 Architect" "$m2_cmd"
+        launch_in_terminal "Master-2 Architect" "$launcher_dir/master-2.sh" "$sh_continue_arg"
         sleep 1
-        launch_in_terminal "Master-3 Allocator" "$m3_cmd"
+        launch_in_terminal "Master-3 Allocator" "$launcher_dir/master-3.sh" "$sh_continue_arg"
         sleep 1
-        launch_in_terminal "Master-1 Interface" "$m1_cmd"
+        launch_in_terminal "Master-1 Interface" "$launcher_dir/master-1.sh" "$sh_continue_arg"
         sleep 1
 
         ok "  3 master terminals launched"
 
         # ── Launch worker sentinels ──
         step "  Launching worker sentinels..."
-        sentinel_script="$project_path/.claude/scripts/worker-sentinel.sh"
         for i in $(seq 1 $worker_count); do
-            sentinel_cmd="export PATH=\"\$HOME/bin:\$HOME/.local/bin:\$PATH\"; bash '$sentinel_script' $i '$project_path'"
-            launch_in_terminal "Worker-$i Sentinel" "$sentinel_cmd"
+            launch_in_terminal "Worker-$i Sentinel" "$launcher_dir/worker-$i.sh" ""
             sleep 1
         done
         ok "  $worker_count worker sentinels launched (persistent)"
