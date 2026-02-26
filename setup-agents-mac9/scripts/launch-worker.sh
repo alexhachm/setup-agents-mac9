@@ -44,13 +44,8 @@ if [ -f "$PID_FILE" ]; then
             if tasklist.exe /FI "PID eq $sentinel_pid" 2>/dev/null | grep -q "$sentinel_pid"; then
                 sentinel_alive=true
             fi
-        elif grep -qi microsoft /proc/version 2>/dev/null; then
-            # WSL: check via PowerShell (the sentinel runs in a Windows terminal)
-            if powershell.exe -NoProfile -Command "Get-Process -Id $sentinel_pid -ErrorAction SilentlyContinue" 2>/dev/null | grep -q .; then
-                sentinel_alive=true
-            fi
         else
-            # Native Linux/macOS: use kill -0
+            # WSL / Linux / macOS: sentinel is a local bash process, use kill -0
             if kill -0 "$sentinel_pid" 2>/dev/null; then
                 sentinel_alive=true
             fi
@@ -112,6 +107,23 @@ elif [[ "$OSTYPE" == darwin* ]]; then
             activate
             do script \"$SENTINEL_CMD\"
         end tell" &
+    fi
+
+elif grep -qi microsoft /proc/version 2>/dev/null; then
+    # WSL: launch via Windows Terminal or cmd.exe into WSL bash
+    if [ -f "$SH_FILE" ]; then
+        LAUNCH_CMD="bash '$SH_FILE'"
+    else
+        LAUNCH_CMD="export PATH=\"\$HOME/bin:\$HOME/.local/bin:\$PATH\"; bash '$SENTINEL_SCRIPT' $WORKER_NUM '$PROJECT_DIR'"
+    fi
+    if command -v wt.exe &>/dev/null; then
+        wt.exe -w workers new-tab --title "Worker-$WORKER_NUM" wsl.exe bash -lc "$LAUNCH_CMD" &
+    elif command -v cmd.exe &>/dev/null; then
+        cmd.exe /c start "" wsl.exe bash -lc "$LAUNCH_CMD" &
+    else
+        echo "WARN: No Windows terminal found from WSL. Run manually:" >&2
+        echo "  $LAUNCH_CMD" >&2
+        exit 1
     fi
 
 else

@@ -163,6 +163,18 @@ if [[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin* ]] && command -v wsl.exe &>/dev
     fi
 fi
 
+# On Windows, ensure inotify-tools is available inside WSL for instant signal delivery
+if [[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin* ]] && command -v wsl.exe &>/dev/null; then
+    if ! wsl.exe bash -lc 'command -v inotifywait' &>/dev/null; then
+        step "Installing inotify-tools inside WSL (for instant signal delivery)..."
+        if wsl.exe bash -c 'sudo apt-get install -y inotify-tools' 2>/dev/null; then
+            ok "inotify-tools installed in WSL"
+        else
+            skip "Could not install inotify-tools in WSL — agents will use 2s polling fallback"
+        fi
+    fi
+fi
+
 # Check for filesystem watcher (optional but recommended)
 HAS_FSWATCH=false
 if command -v fswatch &>/dev/null; then
@@ -829,9 +841,10 @@ if [[ "$launch" =~ ^[Yy]$ ]]; then
     else
         step "Resetting sessions (wiping ALL Claude Code state)..."
 
-        for f in handoff.json codebase-map.json fix-queue.json; do
+        for f in codebase-map.json fix-queue.json; do
             echo '{}' > "$project_path/.claude-shared-state/$f" 2>/dev/null || true
         done
+        echo '{"requests":[]}' > "$project_path/.claude-shared-state/handoff.json" 2>/dev/null || true
         # Pre-populate worker-status with idle entries
         echo "{}" | jq --argjson n "$worker_count" '
           [range(1; $n+1)] | reduce .[] as $i ({};
@@ -875,6 +888,7 @@ HEALTH
         rm -rf "$project_path/.claude-shared-state/"*.lockdir 2>/dev/null || true
         rm -f "$project_path/.claude-shared-state/"*.lock 2>/dev/null || true
         rm -f "$project_path/.claude/signals/"* 2>/dev/null || true
+        rm -f "$project_path/.claude-shared-state/tasks/"*.json 2>/dev/null || true
 
         mkdir -p "$project_path/.claude/logs"
         echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [setup] [FRESH_RESET] All sessions wiped (knowledge preserved)" > "$project_path/.claude/logs/activity.log"
